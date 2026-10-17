@@ -1,7 +1,5 @@
 # Sony RAW Panel — portable 0.6.0
 
-Автор: **Alexey Storozhilov** · [GitHub](https://github.com/llWHiTE/sony-raw-panel)
-
 Плавающая Windows-панель для проявки Sony ARW настоящим Imaging Edge Edit с передачей результата в Photoshop. Альтернативный режим Adobe открывает встроенный RAW-смарт-объект Camera Raw. Можно сравнить оба варианта, выбрать профиль и продолжить ретушь в полном разрешении.
 
 **[Скачать последнюю версию](https://github.com/llWHiTE/sony-raw-panel/releases/latest)** · [История версий](CHANGELOG.md) · [Подробная инструкция](PANEL.md)
