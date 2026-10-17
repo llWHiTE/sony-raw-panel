@@ -149,7 +149,10 @@ class Controller:
             raise RuntimeError(result.get('error', 'Comparison failed'))
         return result
 
-    def compare(self, source, edge=1600):
+    def compare(self, source, percent=50):
+        from preview_settings import validate_percent
+        percent = validate_percent(percent)
+        started = time.monotonic()
         if self.pending or self.recovery:
             raise RuntimeError('Завершите текущую коррекцию перед сравнением.')
         if getattr(self, 'comparison', None):
@@ -167,7 +170,7 @@ class Controller:
         try:
             if not handle or error == 183:
                 raise RuntimeError('Другая операция Sony уже выполняется.')
-            state = comparison.prepare(Path(source), edge, self.notify)
+            state = comparison.prepare(Path(source), percent, self.notify)
         finally:
             if handle:
                 bridge.w.k.CloseHandle(handle)
@@ -179,6 +182,8 @@ class Controller:
         result = self.compare_call('build', state)
         state['view'] = result['comparison']
         state['view']['historyCount'] = self.compare_call('inspect', state['view'])['historyCount']
+        state['shown'] = 'sony'
+        state['seconds'] = round(time.monotonic()-started, 2)
         self.save_session()
         self.ps.foreground()
         return state
@@ -190,6 +195,7 @@ class Controller:
         result = self.compare_call('show', dict(state['view'], engine=engine))
         state['view']['historyCount'] = self.compare_call('inspect', state['view'])['historyCount']
         state['view']['modified'] = result['modified']
+        state['shown'] = engine
         self.save_session()
         self.ps.foreground()
         return result
@@ -246,6 +252,24 @@ class Controller:
         self.save_session()
         return {'closed': True}
 
+    def cancel(self):
+        state = dict(pending=self.pending, recovery=self.recovery, comparison=self.comparison)
+        if not any(state.values()):
+            return {'cancelled': True, 'retained': False}
+        archive = self.session.parent / 'cancelled-operations'
+        archive.mkdir(exist_ok=True)
+        path = archive / (uuid.uuid4().hex + '.json')
+        bridge.atomic_json(path, dict(state, cancelled_at=time.time()))
+        self.pending = self.recovery = self.comparison = None
+        try:
+            self.save_session()
+        except Exception:
+            self.pending, self.recovery, self.comparison = state['pending'], state['recovery'], state['comparison']
+            raise
+        self.completed = None
+        self.last_render = None
+        return dict(cancelled=True, retained=True, archive=str(path))
+
     def status(self):
         status = self.ps.call('status')
         for target in status.get('targets', []):
@@ -269,6 +293,7 @@ class Controller:
             return False
 
     def open(self, source, first_sony=False, engine='sony'):
+        started = time.monotonic()
         if self.pending or self.recovery or self.comparison:
             raise RuntimeError('Сначала завершите текущую проявку или повторите импорт. Неоконченная коррекция не будет заменена другим RAW.')
         if engine == 'adobe':
@@ -276,13 +301,13 @@ class Controller:
         if first_sony:
             self.notify('Открываю RAW в Sony без промежуточной проявки…')
             target = operation(dict(action='prepare', source=str(source)))
+            target['prepare_seconds'] = round(time.monotonic()-started, 2)
             self.pending = target
             self.save_session()
-            return dict(prepared=True, target=target)
+            return dict(prepared=True, target=target, seconds=target['prepare_seconds'])
         self.notify('Подключаю Photoshop…')
         self.ps.call('status', start=True)
         self.notify('Sony проявляет RAW. При первом запуске это дольше…')
-        started = time.monotonic()
         render = operation(dict(action='open', source=str(source)))
         render.update(source=str(source), sourceName=Path(source).name)
         self.last_render = render
@@ -348,7 +373,7 @@ class Controller:
         self.last_render = render
         if initial:
             render.update(source=target['source'], sourceName=Path(target['source']).name)
-            self.recovery = dict(kind='open', render=render)
+            self.recovery = dict(kind='open', render=render, prepare_seconds=target.get('prepare_seconds', 0))
             self.save_session()
             updated = self.ps.call('open', render, start=True)['target']
             return self._finish_apply(updated, render, started)

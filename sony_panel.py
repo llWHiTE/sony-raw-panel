@@ -16,6 +16,7 @@ if str(SOURCE) not in sys.path:
     sys.path.insert(0, str(SOURCE))
 import runtime_paths as runtime
 from app_info import AUTHOR, GITHUB_URL, VERSION
+import preview_settings as preview
 ROOT = runtime.data_root()
 BUNDLE = runtime.bundle_root()
 spec = importlib.util.spec_from_file_location('panel_core', BUNDLE / 'panel_core.py')
@@ -38,9 +39,13 @@ class Panel:
         self.closed = False
         self.started = 0
         self.heartbeats = 0
+        self.last_error = None
+        self.opening_seconds = 0
+        self.retrying_import = False
+        self.wrap_labels = []
         root.title(TITLE)
-        root.geometry('400x700+%d+60' % max(40, root.winfo_screenwidth()-440))
-        root.minsize(380, 680)
+        root.geometry('440x720+%d+40' % max(20, root.winfo_screenwidth()-480))
+        root.minsize(380, 480)
         root.configure(bg='#20242c')
         root.attributes('-topmost', True)
         root.protocol('WM_DELETE_WINDOW', self.close)
@@ -48,14 +53,17 @@ class Panel:
         self.document_text = tk.StringVar(value='Нет открытого Sony RAW')
         self.detail_text = tk.StringVar(value='Откройте ARW или документ PSD со слоем Sony RAW.')
         self.elapsed_text = tk.StringVar(value='')
+        self.duration_text = tk.StringVar(value='')
         self.target_text = tk.StringVar()
         try:
             prefs = json.loads((ROOT / 'ui-preferences.json').read_text(encoding='utf-8'))
         except (OSError, ValueError):
             prefs = {}
-        self.preview_size = tk.StringVar(value=prefs.get('preview_size', 'Быстро · 1600 px'))
-        if self.preview_size.get() not in ('Быстро · 1600 px', 'Детальнее · 3000 px', 'Полное разрешение'):
-            self.preview_size.set('Быстро · 1600 px')
+        if not isinstance(prefs, dict):
+            prefs = {}
+        percent, self.custom_percent, self.preview_mode = preview.preferences(prefs)
+        self.preview_percent = percent
+        self.preview_size = tk.StringVar(value=preview.custom_label(percent) if self.preview_mode == 'custom' else preview.PRESETS[percent])
         self.engine = tk.StringVar(value='Adobe' if prefs.get('engine') == 'Adobe' else 'Sony')
         self.first_sony = tk.BooleanVar(value=bool(prefs.get('first_sony', False)))
         self.pinned = tk.BooleanVar(value=bool(prefs.get('pinned', True)))
@@ -82,65 +90,19 @@ class Panel:
         style.configure('Sony.TLabel', background='#20242c', foreground='#e5e7eb', font=('Segoe UI', 10))
         style.configure('Muted.TLabel', background='#20242c', foreground='#aeb7c6', font=('Segoe UI', 9))
         style.configure('Heading.TLabel', background='#20242c', foreground='#ffffff', font=('Segoe UI Semibold', 17))
-        style.configure('Sony.TButton', font=('Segoe UI', 10), padding=(12, 9))
-        style.configure('Accent.TButton', background='#5393ce', foreground='#ffffff', font=('Segoe UI Semibold', 11), padding=(12, 11))
-        style.map('Accent.TButton', background=[('disabled', '#3e4a58'), ('active', '#67a3db')])
+        style.configure('Sony.TButton', background='#303845', foreground='#e5e7eb', bordercolor='#454f60', font=('Segoe UI', 10), padding=(10, 8))
+        style.map('Sony.TButton', background=[('disabled', '#272d36'), ('active', '#414e61')], foreground=[('disabled', '#7e8999')])
+        style.configure('Accent.TButton', background='#5393ce', foreground='#ffffff', font=('Segoe UI Semibold', 11), padding=(10, 10))
+        style.map('Accent.TButton', background=[('disabled', '#303845'), ('active', '#67a3db')], foreground=[('disabled', '#7e8999')])
         style.configure('Sony.TCheckbutton', background='#20242c', foreground='#aeb7c6', font=('Segoe UI', 9))
-        frame = ttk.Frame(self.root, padding=18, style='Sony.TFrame')
-        frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='Sony RAW', style='Heading.TLabel').pack(anchor='w')
-        ttk.Label(frame, text='Настоящая проявка Sony → Photoshop', style='Muted.TLabel').pack(anchor='w', pady=(2, 16))
-        engine_row = ttk.Frame(frame, style='Sony.TFrame')
-        engine_row.pack(fill='x', pady=(0, 5))
-        ttk.Label(engine_row, text='Проявка при открытии:', style='Muted.TLabel').pack(side='left')
-        self.engine_choice = ttk.Combobox(engine_row, textvariable=self.engine, values=['Sony', 'Adobe'], state='readonly', width=9)
-        self.engine_choice.pack(side='right')
-        self.first_check = ttk.Checkbutton(frame, text='Сначала настроить в Sony', variable=self.first_sony, style='Sony.TCheckbutton')
-        self.first_check.pack(anchor='w', pady=(0, 8))
-        self.engine.trace_add('write', lambda *_: self.buttons())
-        self.open_button = ttk.Button(frame, text='＋  Открыть RAW…', style='Sony.TButton', command=self.choose)
-        self.open_button.pack(fill='x')
-        compare_row = ttk.Frame(frame, style='Sony.TFrame')
-        compare_row.pack(fill='x', pady=(7, 0))
-        self.compare_button = ttk.Button(compare_row, text='Сравнить…', style='Sony.TButton', command=self.compare)
-        self.compare_button.pack(side='left')
-        self.quality = ttk.Combobox(compare_row, textvariable=self.preview_size, state='readonly', width=22,
-            values=['Быстро · 1600 px', 'Детальнее · 3000 px', 'Полное разрешение'])
-        self.quality.pack(side='right', padx=(7, 0), fill='x', expand=True)
-        self.compare_frame = ttk.Frame(frame, style='Sony.TFrame')
-        self.compare_frame.pack(fill='x')
-        self.compare_switch = ttk.Frame(self.compare_frame, style='Sony.TFrame')
-        self.sony_view = ttk.Button(self.compare_switch, text='Показать Sony', command=lambda: self.show_compare('sony'))
-        self.sony_view.pack(side='left', fill='x', expand=True)
-        self.adobe_view = ttk.Button(self.compare_switch, text='Adobe · Camera ST', command=lambda: self.show_compare('adobe'))
-        self.adobe_view.pack(side='left', fill='x', expand=True, padx=(5, 0))
-        self.use_sony = ttk.Button(self.compare_frame, text='Использовать Sony · полный размер', command=lambda: self.choose_engine('sony'))
-        self.use_adobe = ttk.Button(self.compare_frame, text='Использовать Adobe · полный RAW', command=lambda: self.choose_engine('adobe'))
-        self.cancel_compare = ttk.Button(self.compare_frame, text='Закрыть сравнение', command=self.close_compare)
-        ttk.Label(frame, textvariable=self.document_text, style='Sony.TLabel', wraplength=340).pack(anchor='w', pady=(18, 4))
-        self.combo = ttk.Combobox(frame, state='readonly', textvariable=self.target_text)
-        self.combo.pack(fill='x', pady=(0, 5))
-        self.combo.bind('<<ComboboxSelected>>', self.select)
-        ttk.Label(frame, textvariable=self.detail_text, style='Muted.TLabel', wraplength=340).pack(anchor='w', pady=(0, 12))
-        self.edit_button = ttk.Button(frame, text='Изменить проявку в Sony', style='Sony.TButton', command=self.edit)
-        self.edit_button.pack(fill='x', pady=(0, 7))
-        self.apply_button = ttk.Button(frame, text='Применить в Photoshop', style='Accent.TButton', command=self.apply)
-        self.apply_button.pack(fill='x')
-        self.bar = ttk.Progressbar(frame, mode='indeterminate', length=280)
-        self.bar.pack(fill='x', pady=(15, 6))
-        ttk.Label(frame, textvariable=self.status_text, style='Muted.TLabel', wraplength=340).pack(anchor='w')
-        ttk.Label(frame, textvariable=self.elapsed_text, style='Muted.TLabel').pack(anchor='w', pady=(3, 5))
-        credit = ttk.Frame(frame, style='Sony.TFrame')
-        credit.pack(fill='x', side='bottom', pady=(8, 0))
-        ttk.Label(credit, text=AUTHOR, style='Muted.TLabel').pack(side='left')
-        link = tk.Label(credit, text='GitHub ↗', fg='#81b8ec', bg='#20242c', cursor='hand2', font=('Segoe UI', 9))
-        link.pack(side='right')
-        link.bind('<Button-1>', lambda _: self.github())
-        footer = ttk.Frame(frame, style='Sony.TFrame')
-        footer.pack(fill='x', side='bottom', pady=(8, 0))
-        ttk.Checkbutton(footer, text='Поверх окон', variable=self.pinned, style='Sony.TCheckbutton',
+        style.map('Sony.TCheckbutton', background=[('active', '#20242c')], foreground=[('disabled', '#7e8999')])
+        footer = ttk.Frame(self.root, padding=(18, 8, 18, 12), style='Sony.TFrame')
+        footer.pack(side='bottom', fill='x')
+        row = ttk.Frame(footer, style='Sony.TFrame')
+        row.pack(fill='x')
+        ttk.Checkbutton(row, text='Поверх окон', variable=self.pinned, style='Sony.TCheckbutton',
                         command=lambda: self.root.attributes('-topmost', self.pinned.get())).pack(side='left')
-        self.tools = tk.Menubutton(footer, text='⋯', bg='#20242c', fg='#d8dce4', relief='flat', font=('Segoe UI', 13))
+        self.tools = tk.Menubutton(row, text='⋯', bg='#20242c', fg='#d8dce4', relief='flat', font=('Segoe UI', 13))
         self.tools.pack(side='right')
         menu = tk.Menu(self.tools, tearoff=False)
         menu.add_command(label='Программы и пути…', command=self.paths_dialog)
@@ -152,10 +114,130 @@ class Panel:
         menu.add_separator()
         menu.add_command(label='Инструкция', command=self.help)
         self.tools.configure(menu=menu)
+        credit = ttk.Frame(footer, style='Sony.TFrame')
+        credit.pack(fill='x', pady=(8, 0))
+        ttk.Label(credit, text=AUTHOR, style='Muted.TLabel').pack(side='left')
+        link = tk.Label(credit, text='GitHub ↗', fg='#81b8ec', bg='#20242c', cursor='hand2', font=('Segoe UI', 9))
+        link.pack(side='right')
+        link.bind('<Button-1>', lambda _: self.github())
+
+        area = ttk.Frame(self.root, style='Sony.TFrame')
+        area.pack(fill='both', expand=True)
+        self.canvas = tk.Canvas(area, bg='#20242c', highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(area, orient='vertical', command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side='right', fill='y')
+        self.canvas.pack(side='left', fill='both', expand=True)
+        frame = ttk.Frame(self.canvas, padding=(18, 14, 12, 8), style='Sony.TFrame')
+        self.content_window = self.canvas.create_window((0, 0), window=frame, anchor='nw')
+        frame.bind('<Configure>', lambda _: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        def resize(event):
+            self.canvas.itemconfigure(self.content_window, width=event.width)
+            for label in self.wrap_labels:
+                label.configure(wraplength=max(240, event.width-36))
+        self.canvas.bind('<Configure>', resize)
+        self.root.bind('<MouseWheel>', lambda event: self.canvas.yview_scroll(-int(event.delta/120), 'units') if self.canvas.winfo_height() < frame.winfo_height() else None)
+        def label(variable, style_name, pady):
+            widget = ttk.Label(frame, textvariable=variable, style=style_name, wraplength=360)
+            widget.pack(anchor='w', fill='x', pady=pady)
+            self.wrap_labels.append(widget)
+            return widget
+        ttk.Label(frame, text='Sony RAW', style='Heading.TLabel').pack(anchor='w')
+        ttk.Label(frame, text='Проявка Sony и Adobe в Photoshop', style='Muted.TLabel').pack(anchor='w', pady=(2, 14))
+        engine_row = ttk.Frame(frame, style='Sony.TFrame')
+        engine_row.pack(fill='x', pady=(0, 6))
+        ttk.Label(engine_row, text='Проявка при открытии:', style='Muted.TLabel').pack(side='left')
+        self.engine_choice = ttk.Combobox(engine_row, textvariable=self.engine, values=['Sony', 'Adobe'], state='readonly', width=9)
+        self.engine_choice.pack(side='right')
+        self.first_check = ttk.Checkbutton(frame, text='Сначала настроить в Sony', variable=self.first_sony, style='Sony.TCheckbutton')
+        self.first_check.pack(anchor='w', pady=(0, 10))
+        self.engine.trace_add('write', lambda *_: self.buttons())
+        self.open_button = ttk.Button(frame, text='Открыть RAW…', style='Sony.TButton', command=self.choose)
+        self.open_button.pack(fill='x')
+        quality_row = ttk.Frame(frame, style='Sony.TFrame')
+        quality_row.pack(fill='x', pady=(12, 6))
+        ttk.Label(quality_row, text='Предпросмотр:', style='Muted.TLabel').pack(side='left')
+        self.quality = ttk.Combobox(quality_row, textvariable=self.preview_size, state='readonly', width=22, values=self.preview_options())
+        self.quality.pack(side='right', padx=(8, 0), fill='x', expand=True)
+        self.quality.bind('<<ComboboxSelected>>', self.select_quality)
+        self.compare_button = ttk.Button(frame, text='Сравнить Sony / Adobe…', style='Sony.TButton', command=self.compare)
+        self.compare_button.pack(fill='x')
+        self.compare_frame = ttk.Frame(frame, style='Sony.TFrame')
+        self.use_current = ttk.Button(self.compare_frame, text='Использовать показанную проявку', style='Sony.TButton', command=self.choose_current)
+        self.use_current.pack(fill='x', pady=(6, 0))
+        self.cancel_compare = ttk.Button(self.compare_frame, text='Закрыть сравнение', style='Sony.TButton', command=self.close_compare)
+        self.cancel_compare.pack(fill='x', pady=(6, 0))
+        self.document_label = label(self.document_text, 'Sony.TLabel', (14, 4))
+        self.combo = ttk.Combobox(frame, state='readonly', textvariable=self.target_text)
+        self.combo.bind('<<ComboboxSelected>>', self.select)
+        self.detail_label = label(self.detail_text, 'Muted.TLabel', (0, 10))
+        self.edit_button = ttk.Button(frame, text='Изменить проявку в Sony', style='Sony.TButton', command=self.edit)
+        self.edit_button.pack(fill='x', pady=(0, 6))
+        self.apply_button = ttk.Button(frame, text='Применить в Photoshop', style='Accent.TButton', command=self.apply)
+        self.apply_button.pack(fill='x')
+        self.cancel_button = ttk.Button(frame, text='Отменить проявку', style='Sony.TButton', command=self.cancel)
+        self.bar = ttk.Progressbar(frame, mode='indeterminate', length=280)
+        self.bar.pack(fill='x', pady=(12, 6))
+        self.status_label = label(self.status_text, 'Muted.TLabel', (0, 4))
+        label(self.duration_text, 'Sony.TLabel', (3, 0))
+        label(self.elapsed_text, 'Muted.TLabel', (2, 0))
+        ttk.Label(frame, text='Ctrl+O — открыть · Ctrl+Enter — применить', style='Muted.TLabel').pack(anchor='w', pady=(5, 0))
+
+    def preview_options(self):
+        return list(preview.PRESETS.values()) + [preview.custom_label(self.custom_percent), preview.CUSTOM]
+
+    def select_quality(self, _=None):
+        value = self.preview_size.get()
+        if value == preview.CUSTOM:
+            self.custom_quality()
+            return
+        for percent, text in preview.PRESETS.items():
+            if value == text:
+                self.preview_percent, self.preview_mode = percent, 'preset'
+                break
+        else:
+            self.preview_percent, self.preview_mode = self.custom_percent, 'custom'
+        self.save_preferences()
+
+    def custom_quality(self):
+        previous = preview.custom_label(self.preview_percent) if self.preview_mode == 'custom' else preview.PRESETS[self.preview_percent]
+        self.preview_size.set(previous)
+        window = tk.Toplevel(self.root)
+        window.title('Свой процент предпросмотра')
+        window.transient(self.root)
+        window.attributes('-topmost', True)
+        frame = ttk.Frame(window, padding=18)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Масштаб каждой стороны от размеров выбранного RAW.\n50% ширины и высоты = 25% числа пикселей.').pack(anchor='w', pady=(0, 10))
+        value = tk.StringVar(value=str(self.custom_percent))
+        entry = ttk.Spinbox(frame, from_=1, to=100, textvariable=value, width=8)
+        entry.pack(anchor='w')
+        error_text = tk.StringVar()
+        ttk.Label(frame, textvariable=error_text, foreground='#a73825').pack(anchor='w', pady=6)
+        def save():
+            try:
+                percent = preview.validate_percent(value.get())
+            except ValueError as error:
+                error_text.set(str(error))
+                return
+            self.preview_percent = self.custom_percent = percent
+            self.preview_mode = 'custom'
+            self.quality.configure(values=self.preview_options())
+            self.preview_size.set(preview.custom_label(percent))
+            self.save_preferences()
+            window.destroy()
+        ttk.Button(frame, text='Сохранить и использовать', command=save).pack(fill='x', pady=4)
+        ttk.Button(frame, text='Отмена', command=window.destroy).pack(fill='x', pady=4)
+        window.bind('<Return>', lambda _: save())
+        window.bind('<Escape>', lambda _: window.destroy())
+        entry.focus_set()
+        entry.selection_range(0, 'end')
+        window.grab_set()
 
     def save_preferences(self, *_):
         core.bridge.atomic_json(ROOT / 'ui-preferences.json', dict(engine=self.engine.get(),
-            first_sony=self.first_sony.get(), preview_size=self.preview_size.get(), pinned=self.pinned.get()))
+            first_sony=self.first_sony.get(), preview_percent=self.preview_percent,
+            preview_mode=self.preview_mode, custom_percent=self.custom_percent, pinned=self.pinned.get()))
 
     def startup(self):
         # Capture Tk values on the UI thread.
@@ -260,21 +342,28 @@ class Panel:
                 self.controller.ps.close()
                 return
             name, function = job
+            started = time.monotonic()
             try:
                 result = function()
-                self.events.put(('done', (name, result)))
+                self.events.put(('done', (name, result, time.monotonic()-started)))
             except Exception as error:
                 logs = ROOT / 'panel-logs'
                 logs.mkdir(exist_ok=True)
                 with (logs / 'panel.log').open('a', encoding='utf-8') as f:
                     f.write('\n' + time.strftime('%Y-%m-%d %H:%M:%S ') + name + '\n' + traceback.format_exc())
-                self.events.put(('error', (name, str(error))))
+                self.events.put(('error', (name, str(error), time.monotonic()-started)))
 
     def submit(self, name, function):
         if self.busy:
             return False
         self.busy = True
         self.started = time.monotonic()
+        pending = self.controller.pending or {}
+        recovery = self.controller.recovery or {}
+        self.opening_seconds = pending.get('prepare_seconds', 0) if name == 'apply' and not recovery else 0
+        self.retrying_import = name == 'apply' and bool(recovery)
+        self.last_error = None
+        self.status_label.configure(foreground='#aeb7c6')
         self.status_text.set('Выполняю…')
         self.bar.start(12)
         self.buttons()
@@ -286,40 +375,51 @@ class Panel:
         pending = self.controller.pending
         recovery = self.controller.recovery
         comparison = self.controller.comparison
-        self.engine_choice.configure(state='readonly' if idle and not pending and not recovery and not comparison else 'disabled')
-        self.first_check.configure(state='normal' if idle and self.engine.get() == 'Sony' and not pending and not comparison else 'disabled')
-        self.compare_button.configure(state='normal' if idle and not pending and not recovery and not comparison else 'disabled')
-        self.quality.configure(state='readonly' if idle and not comparison else 'disabled')
-        for button in (self.sony_view, self.adobe_view, self.use_sony, self.use_adobe):
-            button.configure(state='normal' if idle and comparison and comparison.get('view') and not recovery else 'disabled')
+        free = idle and not pending and not recovery and not comparison
+        self.engine_choice.configure(state='readonly' if free else 'disabled')
+        self.first_check.configure(state='normal' if free and self.engine.get() == 'Sony' else 'disabled')
+        ready_compare = bool(comparison and comparison.get('view'))
+        shown = (comparison or {}).get('shown', 'sony')
+        self.compare_button.configure(state='normal' if free or (idle and ready_compare and not recovery) else 'disabled',
+            text=('Сейчас Sony · показать Adobe' if shown == 'sony' else 'Сейчас Adobe · показать Sony') if ready_compare else 'Сравнить Sony / Adobe…')
+        self.quality.configure(state='readonly' if free else 'disabled')
+        self.use_current.configure(state='normal' if idle and ready_compare and not recovery else 'disabled',
+            text='Использовать %s · полный размер' % ('Sony' if shown == 'sony' else 'Adobe RAW'))
         self.cancel_compare.configure(state='normal' if idle and comparison and not recovery else 'disabled')
         if comparison:
-            if not self.compare_switch.winfo_manager():
-                self.compare_switch.pack(fill='x', pady=(10, 5))
-                self.use_sony.pack(fill='x', pady=3)
-                self.use_adobe.pack(fill='x', pady=3)
-                self.cancel_compare.pack(fill='x', pady=3)
-                self.edit_button.pack_forget()
+            if not self.compare_frame.winfo_manager():
+                self.compare_frame.pack(fill='x', after=self.compare_button)
+            self.edit_button.pack_forget()
+            if not recovery:
                 self.apply_button.pack_forget()
-                self.root.geometry('400x780')
-                self.root.minsize(380, 760)
-            if recovery:
+            percent = comparison.get('percent')
+            size = ('%d%% от RAW' % percent) if percent else 'предыдущий предпросмотр'
+            view = comparison.get('view') or {}
+            pixels = ' · %d × %d' % (view['width'], view['height']) if view.get('width') else ''
+            self.document_text.set('Сравнение: ' + size + pixels)
+            self.detail_text.set('Переключайте одной кнопкой. Выбранная проявка откроется в полном разрешении.')
+        else:
+            self.compare_frame.pack_forget()
+            if not self.edit_button.winfo_manager():
+                self.edit_button.pack(fill='x', pady=(0, 6), before=self.bar)
+        if not comparison or recovery:
+            if not self.apply_button.winfo_manager():
                 self.apply_button.pack(fill='x', before=self.bar)
-            else:
-                self.apply_button.pack_forget()
-            self.document_text.set('Сравнение · ' + str(comparison['edge'] or 'полное') + (' px' if comparison['edge'] else ''))
-            self.detail_text.set('Предпросмотр. Выбор ниже создаст рабочий документ в полном разрешении.')
-        elif self.compare_switch.winfo_manager():
-            for widget in (self.compare_switch, self.use_sony, self.use_adobe, self.cancel_compare):
-                widget.pack_forget()
-            self.edit_button.pack(fill='x', pady=(0, 7), before=self.bar)
-            self.apply_button.pack(fill='x', before=self.bar)
-            self.root.geometry('400x700')
-            self.root.minsize(380, 680)
-        self.open_button.configure(state='normal' if idle and not pending and not recovery and not comparison else 'disabled')
+        if pending or recovery or (comparison and self.last_error):
+            if not self.cancel_button.winfo_manager():
+                self.cancel_button.pack(fill='x', pady=(6, 0), before=self.bar)
+        else:
+            self.cancel_button.pack_forget()
+        self.cancel_button.configure(state='normal' if idle else 'disabled')
+        self.open_button.configure(state='normal' if free else 'disabled')
         self.edit_button.configure(state='normal' if idle and (self.selected or pending) and not recovery and not comparison else 'disabled')
         self.apply_button.configure(state='normal' if idle and (pending or recovery) else 'disabled',
                                     text='Повторить импорт в Photoshop' if recovery else 'Применить в Photoshop')
+        if len(self.targets) > 1 and not comparison:
+            if not self.combo.winfo_manager():
+                self.combo.pack(fill='x', pady=(0, 5), before=self.detail_label)
+        else:
+            self.combo.pack_forget()
         self.combo.configure(state='readonly' if idle and not pending and not recovery and len(self.targets)>1 else 'disabled')
 
     def choose(self):
@@ -336,15 +436,23 @@ class Panel:
         self.submit('open', lambda: self.controller.open(Path(path), first_sony=first_sony, engine=engine))
 
     def compare(self):
-        if self.busy or self.controller.pending or self.controller.recovery or self.controller.comparison:
+        if self.busy or self.controller.pending or self.controller.recovery:
+            return
+        if self.controller.comparison:
+            engine = 'adobe' if self.controller.comparison.get('shown', 'sony') == 'sony' else 'sony'
+            self.show_compare(engine)
             return
         source = filedialog.askopenfilename(parent=self.root, title='Сравнить Sony / Adobe Camera ST', filetypes=[('Sony RAW', '*.arw *.ARW')])
         if source:
-            edge = {'Быстро · 1600 px':1600, 'Детальнее · 3000 px':3000, 'Полное разрешение':0}[self.preview_size.get()]
-            self.submit('compare', lambda: self.controller.compare(Path(source), edge))
+            percent = self.preview_percent
+            self.submit('compare', lambda: self.controller.compare(Path(source), percent))
 
     def show_compare(self, engine):
         self.submit('compare_show', lambda: self.controller.show_comparison(engine))
+
+    def choose_current(self):
+        if self.controller.comparison:
+            self.choose_engine(self.controller.comparison.get('shown', 'sony'))
 
     def choose_engine(self, engine):
         self.submit('compare_choose', lambda: self.controller.choose_comparison(engine))
@@ -377,6 +485,12 @@ class Panel:
             self.submit('apply', self.controller.retry_import)
         elif self.controller.pending:
             self.submit('apply', self.controller.apply)
+
+    def cancel(self):
+        if self.busy or self.scanning:
+            return
+        if messagebox.askyesno(TITLE, 'Отменить текущую операцию и освободить панель?\n\nОригинал и документы Photoshop не будут изменены.\nГотовая проявка и данные восстановления останутся на диске.', parent=self.root):
+            self.submit('cancel', self.controller.cancel)
 
     def warmup(self):
         self.submit('warmup', self.controller.warmup)
@@ -427,23 +541,33 @@ class Panel:
                 elif event == 'progress':
                     self.status_text.set(value)
                 elif event in ('done', 'error'):
-                    name, result = value
+                    name, result, seconds = value
                     if name == 'scan':
                         self.scanning = False
                         if event == 'done':
                             self.scanned(result)
-                        else:
-                            self.status_text.set('Photoshop занят. Закройте его диалог и повторите команду.')
+                        elif not self.last_error:
+                            self.status_text.set('Photoshop недоступен или занят. Запустите его и закройте диалоги.')
                     else:
                         self.busy = False
                         self.bar.stop()
+                        self.elapsed_text.set('')
+                        if name in ('open', 'compare', 'compare_choose', 'apply'):
+                            titles = {'open': 'Открытие', 'compare': 'Подготовка сравнения', 'compare_choose': 'Открытие полного размера',
+                                      'apply': 'Повторный импорт' if self.retrying_import else 'Применение'}
+                            self.duration_text.set('%s: %.1f с%s' % (titles[name], seconds, ' · ошибка' if event == 'error' else ''))
+                            if event == 'done' and self.opening_seconds:
+                                self.duration_text.set('Открытие и первая проявка: %.1f с\nПрименение: %.1f с · время настройки в Sony не включено' % (self.opening_seconds+seconds, seconds))
                         if event == 'error':
+                            self.last_error = result
+                            self.status_label.configure(foreground='#efad96')
                             self.status_text.set(result)
                         elif name == 'compare':
                             view = result['view']
                             self.status_text.set('Сравнение %d × %d. Переключайте Sony / Adobe и выберите проявщик.' % (view['width'],view['height']))
                         elif name == 'compare_show':
-                            self.status_text.set('Показан выбранный вариант. Рабочий RAW остаётся полноразмерным.')
+                            engine = (self.controller.comparison or {}).get('shown', 'sony')
+                            self.status_text.set('Показан Sony.' if engine == 'sony' else 'Показан Adobe Camera ST.')
                         elif name == 'compare_close':
                             self.status_text.set('Сравнение закрыто.' if result.get('closed') else 'Изменённое сравнение оставлено открытым, его файлы сохранены.')
                             self.root.after(100, self.scan)
@@ -473,6 +597,13 @@ class Panel:
                                     'Временный TIFF удалён.' if result['cleaned'] else 'Кэш занят; очистится позже.'))
                             self.scanning = True
                             self.jobs.put(('scan', self.controller.status))
+                        elif name == 'cancel':
+                            self.selected = None
+                            self.targets = []
+                            self.opening_seconds = 0
+                            self.document_text.set('Операция отменена')
+                            self.detail_text.set('Можно открыть другой RAW. Данные отменённой операции сохранены.')
+                            self.status_text.set('Отменено без изменения исходника и документов Photoshop.')
                         elif name == 'defer':
                             self.status_text.set('Рецепт сохранён отдельно. Photoshop не изменён.')
                             self.root.after(100, self.scan)
@@ -495,7 +626,7 @@ class Panel:
         if self.busy:
             self.elapsed_text.set('%.0f с · не переключайте снимок в Sony' % (time.monotonic()-self.started))
         else:
-            self.elapsed_text.set('Ctrl+O — открыть · Ctrl+Enter — применить')
+            self.elapsed_text.set('')
         if self.heartbeats % 12 == 0:
             self.scan()
         if not self.closed:
@@ -514,6 +645,8 @@ class Panel:
                 return
         self.closed = True
         self.jobs.put(None)
+        for task in self.root.tk.call('after', 'info'):
+            self.root.after_cancel(task)
         core.bridge.w.u.SetWindowLongPtrW(self.drop_hwnd, -4, self.old_wndproc)
         self.root.destroy()
 

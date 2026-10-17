@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.0 — 2026-10-17
+
+- Preview resolution is now 100%, 75%, 50% or a saved custom integer percentage (1–100%) of each source ARW's own usable width and height. Dimensions come from TIFF/Exif metadata, not a fixed camera resolution or Sony's last export settings.
+- One comparison button starts the preview and then toggles Sony / Adobe; a single full-resolution action uses the currently shown engine.
+- Opening, comparison and Apply durations remain visible after completion. Initial Sony preparation and the first Apply can be reported together, excluding manual adjustment time.
+- Added **Отменить проявку** for pending/failed operations. Cancellation archives local recovery state without contacting Photoshop/Sony, deleting ready renders, or changing open documents.
+- Photoshop host invalidates stale COM references after RPC/JSX errors and reconnects on the next explicit request. Mutating commands are never automatically replayed.
+- Reworked the panel layout: no empty comparison placeholder, no forced window resizing, scrollable content for small windows, a fixed footer, contextual target selection and clearer error styling.
+- Adobe preview decoding no longer uses the legacy medium-size cap for large percentage previews, avoiding upscaling a smaller decode.
+- Added camera-independent dimension, percentage/preference, cancellation and comparison-state regressions. Native preview performance measurements are documented separately.
+
 ## 0.4.0 — 2026-10-17
 
 Author: **Alexey Storozhilov**

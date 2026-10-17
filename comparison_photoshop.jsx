@@ -3,8 +3,8 @@
     options.colorSpace = ColorSpaceType.SRGB;
     options.bitsPerChannel = BitsPerChannelType.SIXTEEN;
     // Legacy CameraRAWSize.MAXIMUM is capped below modern Sony sensor resolution.
-    if (!full && edge) {
-        options.size = edge <= 1600 ? CameraRAWSize.SMALL : CameraRAWSize.MEDIUM;
+    if (!full && edge && edge <= 2048) {
+        options.size = CameraRAWSize.SMALL;
     }
     return options;
 }
@@ -20,6 +20,14 @@ function sonyCompareCall(action, data) {
             sony.activeLayer.name = 'Sony — Imaging Edge';
             adobe = app.open(new File(data.adobe), sonyCompareOptions(data.edge, false));
             var nativeAdobeSize = [adobe.width.as('px'), adobe.height.as('px')];
+            if (nativeAdobeSize[0] < width || nativeAdobeSize[1] < height) {
+                adobe.close(SaveOptions.DONOTSAVECHANGES);
+                adobe = app.open(new File(data.adobe), sonyCompareOptions(0, true));
+                nativeAdobeSize = [adobe.width.as('px'), adobe.height.as('px')];
+                if (nativeAdobeSize[0] < width || nativeAdobeSize[1] < height) {
+                    throw new Error('Adobe RAW меньше запрошенного предпросмотра. Увеличение превью не выполняется.');
+                }
+            }
             var adobeMetadata = adobe.xmpMetadata.rawData;
             var profileVerified = /CameraProfile[=\s][\s\S]{0,40}Camera ST/.test(adobeMetadata) || adobeMetadata.indexOf('>Camera ST<') >= 0;
             if (!profileVerified) throw new Error('Camera Raw не подтвердил профиль Camera ST. Сравнение отменено, чтобы не показывать неверно подписанный вариант.');

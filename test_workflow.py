@@ -66,6 +66,50 @@ class WorkflowTests(unittest.TestCase):
         sony.assert_not_called()
         self.assertEqual(result['engine'],'adobe')
 
+    def test_cancel_after_failed_import_preserves_render_without_photoshop(self):
+        import json
+        raw = Path(self.temp.name)/'working.ARW'
+        raw.write_bytes(b'raw')
+        render = Path(self.temp.name)/'ready.tif'
+        render.write_bytes(b'render')
+        self.c.pending = dict(self.target)
+        self.c.recovery = dict(kind='replace', target=self.target, render={'render':str(render)})
+        self.c.save_session()
+        with patch.object(core,'operation',side_effect=AssertionError('Sony must not be called')):
+            result = self.c.cancel()
+        self.assertTrue(result['cancelled'])
+        self.assertEqual(self.c.ps.calls,[])
+        self.assertEqual(raw.read_bytes(),b'raw')
+        self.assertEqual(render.read_bytes(),b'render')
+        self.assertIsNone(self.c.pending)
+        self.assertIsNone(self.c.recovery)
+        archive=json.loads(Path(result['archive']).read_text())
+        self.assertEqual(archive['recovery']['render']['render'],str(render))
+        restored=core.Controller(session=self.c.session)
+        self.assertIsNone(restored.pending)
+        self.assertIsNone(restored.recovery)
+
+    def test_cancel_keeps_comparison_document_and_backing_files(self):
+        self.c.comparison={'id':'a'*32,'view':{'document':99}}
+        with patch.object(self.c,'compare_call',side_effect=AssertionError('Do not close documents')):
+            self.assertTrue(self.c.cancel()['cancelled'])
+        self.assertIsNone(self.c.comparison)
+
+    def test_cancel_save_failure_keeps_recovery_available(self):
+        self.c.pending=dict(self.target)
+        with patch.object(self.c,'save_session',side_effect=OSError('disk full')):
+            with self.assertRaises(OSError):self.c.cancel()
+        self.assertEqual(self.c.pending,self.target)
+
+    def test_shown_engine_changes_only_after_success(self):
+        self.c.comparison={'view':{'document':1,'historyCount':2},'shown':'sony'}
+        with patch.object(self.c,'compare_call',side_effect=RuntimeError('disconnected')):
+            with self.assertRaises(RuntimeError):self.c.show_comparison('adobe')
+        self.assertEqual(self.c.comparison['shown'],'sony')
+        with patch.object(self.c,'compare_call',side_effect=[{'modified':False},{'historyCount':3}]):
+            self.c.show_comparison('adobe')
+        self.assertEqual(self.c.comparison['shown'],'adobe')
+
     def test_initial_session_restores_after_restart(self):
         self.c.pending=dict(project='a'*32,revision='b'*32,kind='initial',source='source.ARW')
         self.c.save_session()

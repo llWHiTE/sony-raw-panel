@@ -7,6 +7,10 @@ cache/
 cache-v2/
 requests*/
 panel-logs/
+cancelled-operations/
+release-*/
+benchmark-*/
+verification-*/
 settings.json
 ui-preferences.json
 panel-session.json

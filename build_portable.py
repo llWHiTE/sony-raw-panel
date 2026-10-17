@@ -9,8 +9,9 @@ import zipfile
 APP_FILES = (
     'sony_panel.py', 'panel_core.py', 'bridge.py', 'bridge_v2.py', 'sony_windows.py',
     'runtime_paths.py', 'recipe_compare.py', 'app_info.py', 'comparison.py', 'comparison_adobe.py',
+    'preview_settings.py', 'raw_dimensions.py',
     'panel_photoshop.jsx', 'comparison_photoshop.jsx', 'photoshop_host.ps1',
-    'PANEL.md', 'PORTABLE.md', 'THIRD_PARTY_NOTICES.md', 'verification.py',
+    'PANEL.md', 'PORTABLE.md', 'THIRD_PARTY_NOTICES.md', 'BENCHMARK.md', 'CHANGELOG.md', 'verification.py',
 )
 
 

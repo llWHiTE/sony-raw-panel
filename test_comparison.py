@@ -16,17 +16,19 @@ adobe=load('comparison_adobe')
 
 class PreviewTests(unittest.TestCase):
     def test_fast_preview_preserves_aspect(self):
-        self.assertEqual(compare.scaled_size(6336,9504,1600),(1067,1600))
-        self.assertEqual(compare.scaled_size(9504,6336,3000),(3000,2000))
+        self.assertEqual(compare.scaled_size(6336,9504,50),(3168,4752))
+        self.assertEqual(compare.scaled_size(9504,6336,75),(7128,4752))
 
     def test_full_does_not_resize(self):
-        self.assertEqual(compare.scaled_size(6336,9504,0),(6336,9504))
+        self.assertEqual(compare.scaled_size(6336,9504,100),(6336,9504))
 
-    def test_small_source_is_not_upscaled(self):
-        self.assertEqual(compare.scaled_size(800,600,1600),(800,600))
+    def test_each_camera_uses_its_own_resolution(self):
+        self.assertEqual(compare.scaled_size(6000,4000,50),(3000,2000))
+        self.assertEqual(compare.scaled_size(8640,5760,50),(4320,2880))
+        self.assertEqual(compare.scaled_size(800,600,100),(800,600))
 
     def test_invalid_dimensions_rejected(self):
-        for values in ((0,600,1600),(800,-1,1600),(800,600,-1)):
+        for values in ((0,600,50),(800,-1,75),(800,600,-1),(800,600,101),(800,600,0)):
             with self.subTest(values=values),self.assertRaises(ValueError):compare.scaled_size(*values)
 
     def test_adobe_sidecar_never_written_beside_original(self):

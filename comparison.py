@@ -13,25 +13,21 @@ spec = importlib.util.spec_from_file_location('compare_base', BUNDLE / 'bridge_v
 bridge = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bridge)
 w = bridge.w
-PRESETS = {'fast': 1600, 'balanced': 3000, 'full': 0}
+from preview_settings import scaled_size, validate_percent
+from raw_dimensions import image_size
 
-
-def scaled_size(width, height, long_edge):
-    if width <= 0 or height <= 0 or long_edge < 0:
-        raise ValueError('Invalid preview dimensions.')
-    factor = min(1, long_edge / max(width, height)) if long_edge else 1
-    return max(1, round(width * factor)), max(1, round(height * factor))
+PRESETS = {'fast': 50, 'balanced': 75, 'full': 100}
 
 
 class PreviewSony(bridge.Sony):
-    def preview(self, destination, expected_name, edge, on_dimensions=lambda dimensions: None):
+    def preview(self, destination, expected_name, percent, on_dimensions=lambda dimensions: None, source_dimensions=None):
         dialog = self.command_dialog(41217)
         self.check_dialog_source(dialog, w.control(dialog, 1148, 'Edit'), expected_name)
         width = w.control(dialog, 1042, 'Edit')
         height = w.control(dialog, 1037, 'Edit')
-        original = (int(w.get_text(width)), int(w.get_text(height)))
+        original = tuple(source_dimensions) if source_dimensions else (int(w.get_text(width)), int(w.get_text(height)))
         on_dimensions(list(original))
-        new = scaled_size(*original, edge)
+        new = scaled_size(*original, percent)
         self.navigate(dialog, destination.parent)
         w.select(w.control(dialog, 1136, 'ComboBox'), 1)
         bit = w.control(dialog, 1700, 'Button')
@@ -60,12 +56,13 @@ class PreviewSony(bridge.Sony):
         actual = sorted((info[256][0], info[257][0]))
         if actual != sorted(new):
             raise RuntimeError('Sony preview dimensions differ from the requested dimensions: ' + str(actual))
-        return dict(width=info[256][0], height=info[257][0], original=list(original), edge=edge)
+        return dict(width=info[256][0], height=info[257][0], original=list(original),
+                    percent=percent, edge=max(new) if percent < 100 else 0)
 
 
-def prepare(source, edge, notify=lambda text: None):
-    if edge not in PRESETS.values():
-        raise ValueError('Unsupported comparison size.')
+def prepare(source, percent=50, notify=lambda text: None):
+    percent = validate_percent(percent)
+    source_dimensions = image_size(source)
     bridge.PROJECTS.mkdir(exist_ok=True)
     bridge.CACHE.mkdir(exist_ok=True)
     started = time.monotonic()
@@ -79,15 +76,15 @@ def prepare(source, edge, notify=lambda text: None):
     recipe = bridge.snapshot_recipe(sony, folder, data, token)
     data['active_revision'] = token
     bridge.atomic_json(folder / 'project.json', data)
-    notify('Sony: уменьшенная проявка для сравнения…' if edge else 'Sony: полноразмерная проявка для сравнения…')
+    notify('Sony: предпросмотр %d%% от исходного RAW…' % percent)
     def remember_dimensions(values):
         data['output_dimensions'] = values
         bridge.atomic_json(folder / 'project.json', data)
-    dimensions = sony.preview(directory / 'sony.tif', name, edge, remember_dimensions)
+    dimensions = sony.preview(directory / 'sony.tif', name, percent, remember_dimensions, source_dimensions)
     data['output_dimensions'] = dimensions['original']
     bridge.atomic_json(folder / 'project.json', data)
     state = dict(version=1, id=token, project=data['id'], revision=token, source=str(source),
-                 directory=str(directory), sony=str(directory/'sony.tif'), edge=edge,
+                 directory=str(directory), sony=str(directory/'sony.tif'), percent=percent, edge=dimensions['edge'],
                  dimensions=dimensions, created=time.time(), sony_seconds=round(time.monotonic()-started, 2))
     bridge.atomic_json(directory / 'comparison.json', state)
     return state
