@@ -9,13 +9,16 @@ import zipfile
 APP_FILES = (
     'sony_panel.py', 'panel_core.py', 'bridge.py', 'bridge_v2.py', 'sony_windows.py',
     'runtime_paths.py', 'recipe_compare.py', 'app_info.py', 'comparison.py', 'comparison_adobe.py',
-    'preview_settings.py', 'raw_dimensions.py',
+    'preview_settings.py', 'raw_dimensions.py', 'preview_cleanup.py', 'lut_library.py', 'lut_photoshop.jsx',
+    'LICENSE', 'PYTHON_LICENSE.txt', 'TCL_LICENSE.txt', 'TK_LICENSE.txt',
     'panel_photoshop.jsx', 'comparison_photoshop.jsx', 'photoshop_host.ps1',
     'PANEL.md', 'PORTABLE.md', 'THIRD_PARTY_NOTICES.md', 'BENCHMARK.md', 'CHANGELOG.md', 'verification.py',
 )
 
 
 def build(source, python_home, output):
+    if str(source) not in sys.path:
+        sys.path.insert(0, str(source))
     output.mkdir(parents=True, exist_ok=True)
     payload = output / 'runtime-payload.zip'
     with zipfile.ZipFile(payload, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
@@ -24,6 +27,11 @@ def build(source, python_home, output):
             if not path.is_file():
                 raise FileNotFoundError(path)
             archive.write(path, 'app/' + name)
+        for path in sorted((source / 'bundled-luts').iterdir()):
+            if path.is_file() and path.suffix.lower() in ('.cube', '.xmp'):
+                from lut_library import validate
+                validate(path)
+                archive.write(path, 'app/bundled-luts/' + path.name)
         for name in ('python.exe', 'pythonw.exe', 'python314.dll', 'python3.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'LICENSE.txt'):
             archive.write(python_home / name, name)
         for directory in ('Lib', 'DLLs', 'tcl'):
@@ -36,6 +44,10 @@ def build(source, python_home, output):
                 if path.suffix in ('.pyc', '.pdb', '.lib', '.chm', '.ico') or path.name.startswith('_test') or path.name.startswith('_ctypes_test'):
                     continue
                 archive.write(path, relative.as_posix())
+        if not (python_home / 'tcl/tcl8.6/license.terms').exists():
+            archive.write(source / 'TCL_LICENSE.txt', 'tcl/tcl8.6/license.terms')
+        runtime_files = sorted(name for name in archive.namelist() if not name.startswith('app/'))
+        archive.writestr('RUNTIME_MANIFEST.txt', '\n'.join(runtime_files) + '\n')
     exe = output / 'SonyRAWPanel.exe'
     csc = Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe')
     subprocess.run([str(csc), '/nologo', '/target:winexe', '/platform:x64', '/optimize+',

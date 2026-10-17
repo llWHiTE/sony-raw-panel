@@ -53,8 +53,10 @@ class PreviewSony(bridge.Sony):
                 w.click(w.control(restore, 2, 'Button'))
                 self.finish_dialog(restore, 15)
         bridge.base.embed_srgb(destination)
-        actual = sorted((info[256][0], info[257][0]))
-        if actual != sorted(new):
+        actual = (info[256][0], info[257][0])
+        if info.get(274, [1])[0] in (5, 6, 7, 8):
+            actual = tuple(reversed(actual))
+        if actual != new:
             raise RuntimeError('Sony preview dimensions differ from the requested dimensions: ' + str(actual))
         return dict(width=info[256][0], height=info[257][0], original=list(original),
                     percent=percent, edge=max(new) if percent < 100 else 0)
@@ -62,7 +64,7 @@ class PreviewSony(bridge.Sony):
 
 def prepare(source, percent=50, notify=lambda text: None):
     percent = validate_percent(percent)
-    source_dimensions = image_size(source)
+    source_dimensions = image_size(source, oriented=True)
     bridge.PROJECTS.mkdir(exist_ok=True)
     bridge.CACHE.mkdir(exist_ok=True)
     started = time.monotonic()

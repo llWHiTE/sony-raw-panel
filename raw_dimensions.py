@@ -2,7 +2,7 @@
 import struct
 
 
-def image_size(path):
+def image_size(path, oriented=False):
     with open(path, 'rb') as file:
         file.seek(0, 2)
         size = file.tell()
@@ -32,7 +32,7 @@ def image_size(path):
             for i in range(count):
                 entry = entries[i * 12:(i + 1) * 12]
                 tag, kind, count_values = struct.unpack(endian + 'HHI', entry[:8])
-                if tag not in (330, 34665, 40962, 40963, 50720):
+                if tag not in (274, 330, 34665, 40962, 40963, 50720):
                     continue
                 if kind not in (3, 4) or not 1 <= count_values <= 16:
                     continue
@@ -42,14 +42,19 @@ def image_size(path):
             return result
 
         first = directory(struct.unpack(endian + 'I', header[4:])[0])
+        orientation = first.get(274, (1,))[0]
+        if orientation not in range(1, 9):
+            raise ValueError('Неподдерживаемая ориентация ARW.')
+        def display(dimensions):
+            return tuple(reversed(dimensions)) if oriented and orientation in (5, 6, 7, 8) else tuple(dimensions)
         if first.get(34665):
             exif = directory(first[34665][0])
             if exif.get(40962) and exif.get(40963):
                 dimensions = exif[40962][0], exif[40963][0]
                 if all(0 < value <= 100000 for value in dimensions):
-                    return dimensions
+                    return display(dimensions)
         for offset in first.get(330, ()):
             crop = directory(offset).get(50720)
             if crop and len(crop) == 2 and all(0 < value <= 100000 for value in crop):
-                return crop
+                return display(crop)
     raise ValueError('В ARW не найдены размеры исходного изображения. Предпросмотр не создан: размер другой камеры не будет использован.')

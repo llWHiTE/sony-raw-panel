@@ -122,7 +122,11 @@ function sonyPanelCall(action, data) {
             doc.activeLayer.name = 'Sony RAW — ' + (data.sourceName || data.project.substring(0, 8));
             doc.info.caption = 'Sony RAW Panel\nOriginal: ' + (data.source || '') + '\nProject: ' + data.project +
                 '\nKeep the original ARW and the sony-raw-prototype/projects folder.';
-            return sonyPanelJSON({ok: true, target: sonyPanelDescribe(doc, doc.activeLayer)});
+            var rawLayer = doc.activeLayer;
+            var described = sonyPanelDescribe(doc, rawLayer);
+            if (data.lut && data.lut.kind === 'cube') sonyApplyLut(doc, data.lut);
+            doc.activeLayer = rawLayer;
+            return sonyPanelJSON({ok: true, target: described});
         }
         if (action === 'replace') {
             var target = sonyPanelTarget(data.target);

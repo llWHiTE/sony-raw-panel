@@ -9,6 +9,16 @@
     return options;
 }
 
+function sonyCompareScale(sourceWidth, sourceHeight, width, height) {
+    var scale = Math.min(width / sourceWidth, height / sourceHeight);
+    var scaledWidth = Math.round(sourceWidth * scale);
+    var scaledHeight = Math.round(sourceHeight * scale);
+    if (Math.abs(scaledWidth - width) > 1 || Math.abs(scaledHeight - height) > 1) {
+        throw new Error('Пропорции Sony и Adobe отличаются. Растягивание изображения запрещено.');
+    }
+    return {width:scaledWidth, height:scaledHeight};
+}
+
 function sonyCompareCall(action, data) {
     var dialogs = app.displayDialogs;
     var adobe = null, sony = null;
@@ -29,22 +39,29 @@ function sonyCompareCall(action, data) {
                 }
             }
             var adobeMetadata = adobe.xmpMetadata.rawData;
-            var profileVerified = /CameraProfile[=\s][\s\S]{0,40}Camera ST/.test(adobeMetadata) || adobeMetadata.indexOf('>Camera ST<') >= 0;
+            var expectedProfile = data.adobeProfile || 'Camera ST';
+            var profileVerified = adobeMetadata.indexOf('"' + expectedProfile + '"') >= 0 || adobeMetadata.indexOf('>' + expectedProfile + '<') >= 0;
             if (!profileVerified) throw new Error('Camera Raw не подтвердил профиль Camera ST. Сравнение отменено, чтобы не показывать неверно подписанный вариант.');
             if (adobe.colorProfileName !== 'sRGB IEC61966-2.1') {
                 adobe.convertProfile('sRGB IEC61966-2.1', Intent.RELATIVECOLORIMETRIC, true, false);
             }
-            adobe.resizeImage(UnitValue(width, 'px'), UnitValue(height, 'px'), undefined, ResampleMethod.BICUBIC);
+            var scaled = sonyCompareScale(nativeAdobeSize[0], nativeAdobeSize[1], width, height);
+            adobe.resizeImage(UnitValue(scaled.width, 'px'), undefined, undefined, ResampleMethod.BICUBIC);
+            if (adobe.width.as('px') !== width || adobe.height.as('px') !== height) {
+                adobe.resizeCanvas(UnitValue(width, 'px'), UnitValue(height, 'px'), AnchorPosition.MIDDLECENTER);
+            }
             adobe.activeLayer.duplicate(sony, ElementPlacement.PLACEATBEGINNING);
             adobe.close(SaveOptions.DONOTSAVECHANGES); adobe = null;
             app.activeDocument = sony;
             var adobeLayer = sony.activeLayer;
-            adobeLayer.name = 'Adobe — Camera ST';
+            adobeLayer.name = 'Adobe — ' + expectedProfile + (data.lut && data.lut.kind === 'xmp' ? ' / ' + data.lut.name : '');
             var sonyLayer = sony.layers[1];
             var reference = {document: sony.id, sonyLayer: sonyLayer.id, adobeLayer: adobeLayer.id,
-                             width: width, height: height, adobeDecodedSize: nativeAdobeSize, profileVerified: profileVerified};
+                             width: width, height: height, adobeDecodedSize: nativeAdobeSize, profileVerified: profileVerified, previewID:data.id};
             adobeLayer.visible = false;
-            sony.info.caption = 'Sony / Adobe comparison preview. Choose an engine in the Sony RAW panel to create a full-resolution working document.';
+            if (data.lut && data.lut.kind === 'cube') reference.lutLayer = sonyApplyLut(sony, data.lut);
+            reference.layerCount = sony.layers.length;
+            sony.info.caption = 'Sony RAW Panel comparison: ' + data.id + '. Choose an engine in the panel to create a full-resolution working document.';
             reference.historyCount = sony.historyStates.length;
             return sonyPanelJSON({ok:true, comparison:reference});
         }
@@ -74,25 +91,39 @@ function sonyCompareCall(action, data) {
                 throw new Error('Adobe не подтвердил встроенный исходный RAW.');
             }
             var profile = doc.xmpMetadata.rawData;
-            if (!/CameraProfile[=\s][\s\S]{0,40}Camera ST/.test(profile) && profile.indexOf('>Camera ST<') < 0) {
-                throw new Error('Camera Raw не подтвердил Camera ST для рабочего документа.');
+            var fullProfile = data.adobeProfile || 'Camera ST';
+            if (profile.indexOf('"' + fullProfile + '"') < 0 && profile.indexOf('>' + fullProfile + '<') < 0) {
+                throw new Error('Camera Raw не подтвердил выбранный профиль: ' + fullProfile);
             }
-            var actual = [Math.round(doc.width.as('px')), Math.round(doc.height.as('px'))].sort(function(a,b){return a-b;});
-            var expected = data.dimensions ? data.dimensions.original.slice(0).sort(function(a,b){return a-b;}) : actual;
+            var actual = [Math.round(doc.width.as('px')), Math.round(doc.height.as('px'))];
+            var expected = data.dimensions ? data.dimensions.original.slice(0) : actual;
             if (actual[0] !== expected[0] || actual[1] !== expected[1]) {
                 throw new Error('Camera Raw не выдал полное исходное разрешение: ' + actual.join(' × ') + ', ожидалось ' + expected.join(' × ') + '. Рабочий документ не подтверждён.');
             }
-            doc.activeLayer.name = 'Adobe RAW — Camera ST';
+            doc.activeLayer.name = 'Adobe RAW — ' + fullProfile;
+            var rawKind = String(doc.activeLayer.kind);
+            if (data.lut && data.lut.kind === 'cube') sonyApplyLut(doc, data.lut);
             adobe = null;
-            return sonyPanelJSON({ok:true, document:doc.id, width:doc.width.as('px'), height:doc.height.as('px'), kind:String(doc.activeLayer.kind), embeddedRaw:true, profileVerified:true});
+            return sonyPanelJSON({ok:true, document:doc.id, width:doc.width.as('px'), height:doc.height.as('px'), kind:rawKind, embeddedRaw:true, profileVerified:true, adobeProfile:fullProfile});
+        }
+        if (action === 'purge') {
+            app.purge(PurgeTarget.ALLCACHES);
+            return sonyPanelJSON({ok:true, purged:true});
         }
         if (action === 'close') {
+            var exists = false;
+            for (var i = 0; i < app.documents.length; i++) {
+                if (app.documents[i].id === data.document) exists = true;
+            }
+            if (!exists) return sonyPanelJSON({ok:true, absent:true});
             var doc = sonyPanelDocument(data.document);
             var previousDocument = app.activeDocument;
             var previousDocumentID = previousDocument.id;
             app.activeDocument = doc;
-            if (data.modified || (data.historyCount !== undefined && data.historyCount !== doc.historyStates.length) ||
-                doc.layers.length !== 2 || !sonyPanelLayer(doc,data.sonyLayer) || !sonyPanelLayer(doc,data.adobeLayer)) {
+            if (!data.previewID || doc.info.caption.indexOf('Sony RAW Panel comparison: ' + data.previewID + '.') !== 0 ||
+                data.modified || (data.historyCount !== undefined && data.historyCount !== doc.historyStates.length) ||
+                doc.layers.length !== (data.layerCount || 2) || !sonyPanelLayer(doc,data.sonyLayer) || !sonyPanelLayer(doc,data.adobeLayer) ||
+                (data.lutLayer && !sonyPanelLayer(doc,data.lutLayer))) {
                 app.activeDocument = previousDocument;
                 throw new Error('Документ сравнения изменён; он оставлен открытым.');
             }

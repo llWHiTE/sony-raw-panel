@@ -49,6 +49,22 @@ class RawDimensionsTests(unittest.TestCase):
                     self.assertEqual(image_size(path),(width,height))
                     self.assertEqual(preview.scaled_size(*image_size(path),50),(width//2,height//2))
 
+    def test_orientation_swaps_only_display_dimensions(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path=Path(temp)/'portrait.ARW'
+            for endian in ('<','>'):
+                for orientation in range(1,9):
+                    header=(b'II' if endian=='<' else b'MM')+struct.pack(endian+'HI',42,8)
+                    root=struct.pack(endian+'H',2)
+                    root+=struct.pack(endian+'HHI',274,3,1)+struct.pack(endian+'H',orientation)+bytes(2)
+                    root+=struct.pack(endian+'HHII',34665,4,1,38)+bytes(4)
+                    exif=raw_fixture(7952,5304,endian)[26:]
+                    path.write_bytes(header+root+exif)
+                    expected=(5304,7952) if orientation in (5,6,7,8) else (7952,5304)
+                    self.assertEqual(image_size(path,oriented=True),expected)
+                    self.assertEqual(image_size(path),(7952,5304))
+                    self.assertEqual(preview.scaled_size(*image_size(path,oriented=True),50),tuple(v//2 for v in expected))
+
     def test_missing_dimensions_do_not_reuse_another_camera(self):
         with tempfile.TemporaryDirectory() as temp:
             path=Path(temp)/'unknown.ARW'

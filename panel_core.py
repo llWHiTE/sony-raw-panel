@@ -51,7 +51,8 @@ class Photoshop:
     def evaluate(self, script, start=False, timeout=180):
         with self.lock:
             self._start()
-            script = '$.evalFile(new File(%s));\n' % json.dumps(str(BUNDLE / 'panel_photoshop.jsx')) + script
+            script = '$.evalFile(new File(%s)); $.evalFile(new File(%s));\n' % (
+                json.dumps(str(BUNDLE / 'panel_photoshop.jsx')), json.dumps(str(BUNDLE / 'lut_photoshop.jsx'))) + script
             photoshop_path = runtime.resolve_photoshop() if start else None
             payload = dict(action='eval', start=start, photoshop=str(photoshop_path) if photoshop_path else None,
                            script=base64.b64encode(script.encode('utf-8')).decode('ascii'))
@@ -140,16 +141,25 @@ class Controller:
 
     def save_session(self):
         bridge.atomic_json(self.session, dict(pending=self.pending, recovery=self.recovery, comparison=self.comparison))
+        if self.comparison and self.comparison.get('id'):
+            folder = bridge.child(ROOT / 'comparisons', self.comparison['id'])
+            if folder.is_dir():
+                bridge.atomic_json(folder / 'comparison.json', self.comparison)
 
-    def compare_call(self, action, data):
+    def compare_call(self, action, data, start=True):
         script = '$.evalFile(new File(%s)); sonyCompareCall(%s, %s);' % (
             json.dumps(str(BUNDLE / 'comparison_photoshop.jsx')), json.dumps(action), json.dumps(data, ensure_ascii=True))
-        result = json.loads(self.ps.evaluate(script, start=True, timeout=300))
+        response = self.ps.evaluate(script, start=start, timeout=300)
+        if response is None and action in ('close', 'purge'):
+            return {'ok': True, 'absent': True, 'purged': False}
+        if response is None:
+            raise RuntimeError('Photoshop не запущен.')
+        result = json.loads(response)
         if not result.get('ok'):
             raise RuntimeError(result.get('error', 'Comparison failed'))
         return result
 
-    def compare(self, source, percent=50):
+    def compare(self, source, percent=50, lut=None):
         from preview_settings import validate_percent
         percent = validate_percent(percent)
         started = time.monotonic()
@@ -177,6 +187,9 @@ class Controller:
         self.notify('Adobe: Camera ST, баланс белого «Как снято»…')
         project_folder, project_data = bridge.project(state['project'])
         state['adobe'] = str(adobe.adobe_copy(Path(state['directory']), bridge.validate_raw(project_folder, project_data), state['id'], project_data['source_sha256']))
+        from lut_library import apply_xmp
+        state['lut'] = lut
+        state['adobeProfile'] = apply_xmp(state['adobe'], lut)
         self.comparison = state
         self.save_session()
         result = self.compare_call('build', state)
@@ -207,8 +220,11 @@ class Controller:
         self.notify('Создаю рабочий документ из исходного RAW в полном разрешении…')
         started = time.monotonic()
         if engine == 'sony':
+            state['selected_engine'] = 'sony'
+            self.save_session()
             render = operation(dict(action='update', project=state['project'], revision=state['revision']))
-            render.update(source=state['source'], sourceName=Path(state['source']).name)
+            render.update(source=state['source'], sourceName=Path(state['source']).name,
+                          lut=state.get('lut') if (state.get('lut') or {}).get('kind') == 'cube' else None)
             self.recovery = dict(kind='open', render=render)
             self.save_session()
             target = self.ps.call('open', render, start=True)['target']
@@ -221,6 +237,8 @@ class Controller:
             result.update(engine='adobe', seconds=round(time.monotonic()-started,2))
         else:
             raise ValueError('Unknown development engine.')
+        state['selected_engine'] = engine
+        self.save_session()
         self.finish_comparison()
         self.ps.foreground()
         return result
@@ -231,26 +249,24 @@ class Controller:
             return {'closed': True}
         if state.get('view'):
             try:
-                self.compare_call('close', state['view'])
+                self.compare_call('close', state['view'], start=False)
             except RuntimeError as error:
                 # A modified preview belongs to the user; leave its backing files intact.
+                state['retained'] = True
+                self.save_session()
                 self.comparison = None
                 self.save_session()
                 return {'closed': False, 'retained': str(error)}
         folder = ROOT / 'comparisons' / bridge.checked_id(state['id'])
         if folder.resolve() != folder.absolute():
             raise ValueError('Unexpected comparison path.')
-        for name in ('sony.tif', 'AdobeRAW-' + state['id'] + '.ARW', 'AdobeRAW-' + state['id'] + '.xmp'):
-            path = folder / name
-            if path.is_symlink():
-                raise ValueError('Unexpected comparison file link.')
-            try:
-                path.unlink(missing_ok=True)
-            except PermissionError:
-                pass
+        from preview_cleanup import remove_files
+        removed = remove_files(folder, state['id'])
+        state['closed'] = True
+        self.save_session()
         self.comparison = None
         self.save_session()
-        return {'closed': True}
+        return dict(closed=True, **removed)
 
     def cancel(self):
         state = dict(pending=self.pending, recovery=self.recovery, comparison=self.comparison)
@@ -269,6 +285,69 @@ class Controller:
         self.completed = None
         self.last_render = None
         return dict(cancelled=True, retained=True, archive=str(path))
+
+    def cleanup(self, purge_all=False):
+        from preview_cleanup import records, remove_files, release_sony
+        if purge_all and (self.pending or self.recovery):
+            raise RuntimeError('Сначала завершите или отмените текущую проявку перед очисткой кэша.')
+        result = operation({'action': 'cleanup'})
+        result.update(previews_closed=0, previews_retained=0, sony_closed=0, sony_retained=0, photoshop_purged=False, warnings=[])
+        excluded = set()
+        for state in (self.pending, self.recovery, self.completed):
+            if state:
+                ident = state.get('project') or state.get('render', {}).get('project')
+                if ident:
+                    excluded.add(ident)
+        if self.comparison and not self.pending and not self.recovery:
+            closed = self.finish_comparison()
+            result['previews_closed'] += bool(closed.get('closed'))
+            result['previews_retained'] += not closed.get('closed', False)
+            result['bytes_freed'] += closed.get('bytes_freed', 0)
+        candidates = {}
+        for folder, state in records(ROOT):
+            if state.get('project') in excluded or state.get('selected_engine') == 'sony':
+                continue
+            ident = state.get('project')
+            if ident and state.get('revision') and not state.get('retained'):
+                candidates[ident] = state['revision']
+            if state.get('retained'):
+                result['previews_retained'] += 1
+                continue
+            if not state.get('closed'):
+                if not state.get('view'):
+                    result['previews_retained'] += 1
+                    continue
+                try:
+                    self.compare_call('close', state['view'], start=False)
+                    result['previews_closed'] += 1
+                    state['closed'] = True
+                    bridge.atomic_json(folder / 'comparison.json', state)
+                except RuntimeError as error:
+                    result['previews_retained'] += 1
+                    result['warnings'].append(str(error))
+                    candidates.pop(ident, None)
+                    continue
+            removed = remove_files(folder, state['id'])
+            result['bytes_freed'] += removed['bytes_freed']
+            result['skipped'] += removed['skipped']
+        try:
+            handle = bridge.w.k.CreateMutexW(None, False, 'Local\\SonyRawPrototypeRender')
+            error = C.get_last_error()
+            try:
+                if not handle or error == 183:
+                    raise RuntimeError('Sony занят другой операцией; вкладки не закрыты.')
+                sony = release_sony(bridge, candidates, excluded)
+                result['sony_closed'], result['sony_retained'] = sony['closed'], sony['retained']
+                result['warnings'].extend(sony['warnings'])
+            finally:
+                if handle:
+                    bridge.w.k.CloseHandle(handle)
+        except (OSError, ValueError, RuntimeError, TimeoutError) as error:
+            result['warnings'].append(str(error))
+        if purge_all:
+            purged = self.compare_call('purge', {}, start=False)
+            result['photoshop_purged'] = purged.get('purged', False)
+        return result
 
     def status(self):
         status = self.ps.call('status')
@@ -292,15 +371,18 @@ class Controller:
         except Exception:
             return False
 
-    def open(self, source, first_sony=False, engine='sony'):
+    def open(self, source, first_sony=False, engine='sony', lut=None):
         started = time.monotonic()
         if self.pending or self.recovery or self.comparison:
             raise RuntimeError('Сначала завершите текущую проявку или повторите импорт. Неоконченная коррекция не будет заменена другим RAW.')
         if engine == 'adobe':
-            return self.open_adobe(source)
+            return self.open_adobe(source, lut=lut)
+        if lut and lut.get('kind') == 'xmp':
+            raise ValueError('XMP-пресет работает только в Adobe. Выберите Adobe или обычный .cube LUT для Sony.')
         if first_sony:
             self.notify('Открываю RAW в Sony без промежуточной проявки…')
             target = operation(dict(action='prepare', source=str(source)))
+            target['lut'] = lut
             target['prepare_seconds'] = round(time.monotonic()-started, 2)
             self.pending = target
             self.save_session()
@@ -309,7 +391,7 @@ class Controller:
         self.ps.call('status', start=True)
         self.notify('Sony проявляет RAW. При первом запуске это дольше…')
         render = operation(dict(action='open', source=str(source)))
-        render.update(source=str(source), sourceName=Path(source).name)
+        render.update(source=str(source), sourceName=Path(source).name, lut=lut)
         self.last_render = render
         self.notify('Встраиваю результат в Photoshop…')
         self.recovery = dict(kind='open', render=render)
@@ -322,7 +404,7 @@ class Controller:
         self.ps.foreground()
         return dict(target=target, cleaned=cleaned, seconds=round(time.monotonic()-started, 2))
 
-    def open_adobe(self, source):
+    def open_adobe(self, source, lut=None):
         spec = importlib.util.spec_from_file_location('comparison_adobe', BUNDLE / 'comparison_adobe.py')
         adobe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(adobe)
@@ -336,7 +418,9 @@ class Controller:
         private = adobe.adobe_copy(folder, source, folder.name)
         bridge.atomic_json(folder / 'project.json', dict(source=str(source), engine='adobe',
                           sha256=bridge.base.sha(private), profile='Camera ST'))
-        result = self.compare_call('adobeFull', dict(adobe=str(private), source=str(source)))
+        from lut_library import apply_xmp
+        profile = apply_xmp(private, lut)
+        result = self.compare_call('adobeFull', dict(adobe=str(private), source=str(source), lut=lut, adobeProfile=profile))
         self.ps.foreground()
         result.update(engine='adobe', seconds=round(time.monotonic()-started, 2))
         return result
@@ -372,7 +456,7 @@ class Controller:
             return dict(target=target, cleaned=True, unchanged=True, seconds=round(time.monotonic()-started, 2))
         self.last_render = render
         if initial:
-            render.update(source=target['source'], sourceName=Path(target['source']).name)
+            render.update(source=target['source'], sourceName=Path(target['source']).name, lut=target.get('lut'))
             self.recovery = dict(kind='open', render=render, prepare_seconds=target.get('prepare_seconds', 0))
             self.save_session()
             updated = self.ps.call('open', render, start=True)['target']

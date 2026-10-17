@@ -27,6 +27,9 @@ panel-session.json
 *.psd
 *.psb
 *.xmp
+!bundled-luts/*.xmp
+luts/
+lut-snapshots/
 *.icc
 *.icm
 *.exe

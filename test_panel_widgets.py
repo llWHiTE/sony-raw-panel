@@ -114,6 +114,34 @@ class PanelWidgetTests(unittest.TestCase):
         self.assertIn('Повторный импорт',self.panel.duration_text.get())
         self.assertNotIn('первая проявка',self.panel.duration_text.get())
 
+    def test_cleanup_warning_can_be_disabled_only_on_confirmation(self):
+        self.panel.cleanup_button.invoke()
+        window=next(w for w in self.root.winfo_children() if isinstance(w,tk.Toplevel))
+        widgets=window.winfo_children()[0].winfo_children()
+        next(w for w in widgets if isinstance(w,ttk.Checkbutton)).invoke()
+        result=dict(bytes_freed=0,previews_closed=0,sony_closed=0,photoshop_purged=True,warnings=[])
+        with patch.object(self.panel.controller,'cleanup',return_value=result) as cleanup:
+            next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='Очистить кэш').invoke()
+            self.pump()
+        cleanup.assert_called_once_with(purge_all=True)
+        self.assertFalse(self.panel.cleanup_warning.get())
+        prefs=json.loads((self.folder/'ui-preferences.json').read_text(encoding='utf-8'))
+        self.assertFalse(prefs['cleanup_warning'])
+        with patch.object(self.panel.controller,'cleanup',return_value=result) as cleanup:
+            self.panel.cleanup_button.invoke();self.pump()
+        cleanup.assert_called_once_with(purge_all=True)
+        self.assertFalse(any(isinstance(w,tk.Toplevel) for w in self.root.winfo_children()))
+
+    def test_cancelled_cleanup_warning_does_not_purge(self):
+        self.panel.cleanup_button.invoke()
+        window=next(w for w in self.root.winfo_children() if isinstance(w,tk.Toplevel))
+        widgets=window.winfo_children()[0].winfo_children()
+        next(w for w in widgets if isinstance(w,ttk.Checkbutton)).invoke()
+        with patch.object(self.panel.controller,'cleanup') as cleanup:
+            next(w for w in widgets if isinstance(w,ttk.Button) and w.cget('text')=='Отмена').invoke()
+        cleanup.assert_not_called()
+        self.assertTrue(self.panel.cleanup_warning.get())
+
     def test_comparison_frame_collapses_without_changing_window_size(self):
         before=self.root.geometry()
         c=self.panel.controller

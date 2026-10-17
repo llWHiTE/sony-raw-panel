@@ -67,10 +67,14 @@ class Panel:
         self.engine = tk.StringVar(value='Adobe' if prefs.get('engine') == 'Adobe' else 'Sony')
         self.first_sony = tk.BooleanVar(value=bool(prefs.get('first_sony', False)))
         self.pinned = tk.BooleanVar(value=bool(prefs.get('pinned', True)))
+        self.cleanup_warning = tk.BooleanVar(value=bool(prefs.get('cleanup_warning', True)))
+        from lut_library import Library
+        self.lut_library = Library(ROOT, BUNDLE)
+        self.lut_text = tk.StringVar(value='Без LUT')
         self.build()
         self.install_drop()
         root.attributes('-topmost', self.pinned.get())
-        for preference in (self.preview_size, self.engine, self.first_sony, self.pinned):
+        for preference in (self.preview_size, self.engine, self.first_sony, self.pinned, self.cleanup_warning):
             preference.trace_add('write', self.save_preferences)
         root.bind('<Control-o>', lambda _: self.choose())
         root.bind('<Control-Return>', lambda _: self.apply())
@@ -104,11 +108,13 @@ class Panel:
                         command=lambda: self.root.attributes('-topmost', self.pinned.get())).pack(side='left')
         self.tools = tk.Menubutton(row, text='⋯', bg='#20242c', fg='#d8dce4', relief='flat', font=('Segoe UI', 13))
         self.tools.pack(side='right')
+        self.cleanup_button = ttk.Button(row, text='Очистить кэш', style='Sony.TButton', command=self.cleanup)
+        self.cleanup_button.pack(side='right', padx=(6, 10))
         menu = tk.Menu(self.tools, tearoff=False)
         menu.add_command(label='Программы и пути…', command=self.paths_dialog)
         menu.add_command(label='О программе…', command=self.about)
         menu.add_command(label='Подготовить Sony', command=self.warmup)
-        menu.add_command(label='Очистить подтверждённый кэш', command=self.cleanup)
+        menu.add_checkbutton(label='Предупреждать при очистке кэша', variable=self.cleanup_warning)
         menu.add_command(label='Обновить список документов', command=self.scan)
         menu.add_command(label='Сохранить рецепт без применения', command=self.defer)
         menu.add_separator()
@@ -151,6 +157,13 @@ class Panel:
         self.engine_choice.pack(side='right')
         self.first_check = ttk.Checkbutton(frame, text='Сначала настроить в Sony', variable=self.first_sony, style='Sony.TCheckbutton')
         self.first_check.pack(anchor='w', pady=(0, 10))
+        lut_row = ttk.Frame(frame, style='Sony.TFrame')
+        lut_row.pack(fill='x', pady=(0, 8))
+        ttk.Label(lut_row, text='LUT / XMP:', style='Muted.TLabel').pack(side='left')
+        self.lut_choice = ttk.Combobox(lut_row, textvariable=self.lut_text, values=self.lut_options(), state='readonly', width=20)
+        self.lut_choice.pack(side='left', fill='x', expand=True, padx=(8, 5))
+        self.lut_manage = ttk.Button(lut_row, text='…', style='Sony.TButton', width=3, command=self.manage_luts)
+        self.lut_manage.pack(side='right')
         self.engine.trace_add('write', lambda *_: self.buttons())
         self.open_button = ttk.Button(frame, text='Открыть RAW…', style='Sony.TButton', command=self.choose)
         self.open_button.pack(fill='x')
@@ -182,6 +195,57 @@ class Panel:
         label(self.duration_text, 'Sony.TLabel', (3, 0))
         label(self.elapsed_text, 'Muted.TLabel', (2, 0))
         ttk.Label(frame, text='Ctrl+O — открыть · Ctrl+Enter — применить', style='Muted.TLabel').pack(anchor='w', pady=(5, 0))
+
+    def lut_options(self):
+        return ['Без LUT'] + [p.name + (' · Adobe' if p.suffix.lower() == '.xmp' else '') for p in self.lut_library.entries()]
+
+    def selected_lut(self):
+        if self.lut_text.get() == 'Без LUT':
+            return None
+        for path in self.lut_library.entries():
+            label = path.name + (' · Adobe' if path.suffix.lower() == '.xmp' else '')
+            if label == self.lut_text.get():
+                return self.lut_library.snapshot(path)
+        raise ValueError('Выбранный LUT удалён. Выберите другой или «Без LUT».')
+
+    def manage_luts(self):
+        if self.busy:
+            return
+        window = tk.Toplevel(self.root)
+        window.title('Библиотека LUT / XMP')
+        window.transient(self.root)
+        window.attributes('-topmost', True)
+        frame = ttk.Frame(window, padding=18)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='.cube — отдельный слой для Sony и Adobe.\n.xmp — пресет Camera Raw, только Adobe.\nПо умолчанию обработка выключена.').pack(anchor='w', pady=(0, 8))
+        listing = tk.Listbox(frame, width=42, height=10)
+        listing.pack(fill='both', expand=True)
+        def refresh():
+            listing.delete(0, 'end')
+            for path in self.lut_library.entries():
+                listing.insert('end', path.name)
+            self.lut_choice.configure(values=self.lut_options())
+            if self.lut_text.get() not in self.lut_options():
+                self.lut_text.set('Без LUT')
+        def add():
+            paths = filedialog.askopenfilenames(parent=window, title='Добавить LUT / XMP', filetypes=[('LUT / Adobe preset', '*.cube *.xmp')])
+            for path in paths:
+                try:
+                    self.lut_library.add(path)
+                except (ValueError, OSError) as error:
+                    messagebox.showerror(TITLE, str(error), parent=window)
+            refresh()
+        def remove():
+            selected = listing.curselection()
+            if selected:
+                path = self.lut_library.entries()[selected[0]]
+                if messagebox.askyesno(TITLE, 'Удалить из библиотеки: ' + path.name + '?\nИсходный файл и уже открытые документы сохранятся.', parent=window):
+                    self.lut_library.remove(path)
+                    refresh()
+        ttk.Button(frame, text='Добавить .cube / .xmp…', command=add).pack(fill='x', pady=(8, 4))
+        ttk.Button(frame, text='Удалить выбранный', command=remove).pack(fill='x', pady=4)
+        ttk.Button(frame, text='Закрыть', command=window.destroy).pack(fill='x', pady=4)
+        refresh()
 
     def preview_options(self):
         return list(preview.PRESETS.values()) + [preview.custom_label(self.custom_percent), preview.CUSTOM]
@@ -237,7 +301,8 @@ class Panel:
     def save_preferences(self, *_):
         core.bridge.atomic_json(ROOT / 'ui-preferences.json', dict(engine=self.engine.get(),
             first_sony=self.first_sony.get(), preview_percent=self.preview_percent,
-            preview_mode=self.preview_mode, custom_percent=self.custom_percent, pinned=self.pinned.get()))
+            preview_mode=self.preview_mode, custom_percent=self.custom_percent, pinned=self.pinned.get(),
+            cleanup_warning=self.cleanup_warning.get()))
 
     def startup(self):
         # Capture Tk values on the UI thread.
@@ -377,6 +442,8 @@ class Panel:
         comparison = self.controller.comparison
         free = idle and not pending and not recovery and not comparison
         self.engine_choice.configure(state='readonly' if free else 'disabled')
+        self.lut_choice.configure(state='readonly' if free else 'disabled')
+        self.lut_manage.configure(state='normal' if free else 'disabled')
         self.first_check.configure(state='normal' if free and self.engine.get() == 'Sony' else 'disabled')
         ready_compare = bool(comparison and comparison.get('view'))
         shown = (comparison or {}).get('shown', 'sony')
@@ -397,7 +464,9 @@ class Panel:
             view = comparison.get('view') or {}
             pixels = ' · %d × %d' % (view['width'], view['height']) if view.get('width') else ''
             self.document_text.set('Сравнение: ' + size + pixels)
-            self.detail_text.set('Переключайте одной кнопкой. Выбранная проявка откроется в полном разрешении.')
+            look = comparison.get('lut')
+            note = (' XMP только Adobe: ' if look.get('kind') == 'xmp' else ' LUT: ') + look['name'] if look else ''
+            self.detail_text.set('Переключайте одной кнопкой. Выбранная проявка откроется в полном разрешении.' + note)
         else:
             self.compare_frame.pack_forget()
             if not self.edit_button.winfo_manager():
@@ -411,6 +480,7 @@ class Panel:
         else:
             self.cancel_button.pack_forget()
         self.cancel_button.configure(state='normal' if idle else 'disabled')
+        self.cleanup_button.configure(state='normal' if idle and not pending and not recovery else 'disabled')
         self.open_button.configure(state='normal' if free else 'disabled')
         self.edit_button.configure(state='normal' if idle and (self.selected or pending) and not recovery and not comparison else 'disabled')
         self.apply_button.configure(state='normal' if idle and (pending or recovery) else 'disabled',
@@ -433,7 +503,12 @@ class Panel:
     def open_path(self, path):
         first_sony = self.first_sony.get()
         engine = self.engine.get().lower()
-        self.submit('open', lambda: self.controller.open(Path(path), first_sony=first_sony, engine=engine))
+        try:
+            lut = self.selected_lut()
+        except (OSError, ValueError) as error:
+            self.status_text.set(str(error))
+            return
+        self.submit('open', lambda: self.controller.open(Path(path), first_sony=first_sony, engine=engine, lut=lut))
 
     def compare(self):
         if self.busy or self.controller.pending or self.controller.recovery:
@@ -445,7 +520,12 @@ class Panel:
         source = filedialog.askopenfilename(parent=self.root, title='Сравнить Sony / Adobe Camera ST', filetypes=[('Sony RAW', '*.arw *.ARW')])
         if source:
             percent = self.preview_percent
-            self.submit('compare', lambda: self.controller.compare(Path(source), percent))
+            try:
+                lut = self.selected_lut()
+            except (OSError, ValueError) as error:
+                self.status_text.set(str(error))
+                return
+            self.submit('compare', lambda: self.controller.compare(Path(source), percent, lut=lut))
 
     def show_compare(self, engine):
         self.submit('compare_show', lambda: self.controller.show_comparison(engine))
@@ -496,7 +576,30 @@ class Panel:
         self.submit('warmup', self.controller.warmup)
 
     def cleanup(self):
-        self.submit('cleanup', lambda: core.operation({'action': 'cleanup'}))
+        if self.busy or self.scanning or self.controller.pending or self.controller.recovery:
+            return
+        def run():
+            self.submit('cleanup', lambda: self.controller.cleanup(purge_all=True))
+        if not self.cleanup_warning.get():
+            run()
+            return
+        window = tk.Toplevel(self.root)
+        window.title('Очистить кэш')
+        window.transient(self.root)
+        window.attributes('-topmost', True)
+        frame = ttk.Frame(window, padding=18)
+        frame.pack(fill='both', expand=True)
+        ttk.Label(frame, text='Будут закрыты неизменённые служебные превью Photoshop\nи Sony, удалён подтверждённый временный кэш.\n\nВ Photoshop очистятся кэши ВСЕХ документов, включая\nисторию отмены и буфер обмена. Это необратимо.\nРабочие документы останутся открыты; ARW и рецепты сохранятся.', wraplength=440).pack(anchor='w', pady=(0, 12))
+        skip = tk.BooleanVar(value=False)
+        ttk.Checkbutton(frame, text='Больше не показывать', variable=skip).pack(anchor='w', pady=(0, 10))
+        def confirm():
+            self.cleanup_warning.set(not skip.get())
+            window.destroy()
+            run()
+        ttk.Button(frame, text='Очистить кэш', command=confirm).pack(fill='x', pady=4)
+        ttk.Button(frame, text='Отмена', command=window.destroy).pack(fill='x', pady=4)
+        window.bind('<Escape>', lambda _: window.destroy())
+        window.grab_set()
 
     def defer(self):
         if self.busy or not self.controller.pending:
@@ -524,7 +627,7 @@ class Panel:
         else:
             self.selected = None
             self.target_text.set('')
-            self.document_text.set(result.get('documentName') or 'Photoshop не открыт')
+            self.document_text.set(result.get('documentName') or ('Нет открытого документа Photoshop' if result.get('running') else 'Photoshop не открыт'))
             self.detail_text.set('Нажмите «Открыть RAW».' if not self.targets else 'В документе несколько Sony RAW. Выберите нужный в списке.')
 
     def drain(self):
@@ -567,13 +670,13 @@ class Panel:
                             self.status_text.set('Сравнение %d × %d. Переключайте Sony / Adobe и выберите проявщик.' % (view['width'],view['height']))
                         elif name == 'compare_show':
                             engine = (self.controller.comparison or {}).get('shown', 'sony')
-                            self.status_text.set('Показан Sony.' if engine == 'sony' else 'Показан Adobe Camera ST.')
+                            self.status_text.set('Показан Sony.' if engine == 'sony' else 'Показан Adobe: ' + (self.controller.comparison or {}).get('adobeProfile', 'Camera ST'))
                         elif name == 'compare_close':
                             self.status_text.set('Сравнение закрыто.' if result.get('closed') else 'Изменённое сравнение оставлено открытым, его файлы сохранены.')
                             self.root.after(100, self.scan)
                         elif name == 'compare_choose':
                             if result.get('engine') == 'adobe':
-                                self.status_text.set('Adobe Camera ST · полный RAW-смарт-объект. Настройки — двойным щелчком по слою.')
+                                self.status_text.set('Adobe · полный RAW-смарт-объект. Настройки — двойным щелчком по слою.')
                             else:
                                 self.selected = dict(result['target'])
                                 self.status_text.set('Sony · рабочий документ в полном разрешении. Уменьшение не перенесено в результат.')
@@ -585,7 +688,7 @@ class Panel:
                             self.show_target()
                             self.status_text.set('Настройте RAW в Sony и нажмите «Применить». Первый экспорт пропущен.')
                         elif name == 'open' and result.get('engine') == 'adobe':
-                            self.status_text.set('Adobe Camera ST · RAW-смарт-объект. Для коррекции дважды щёлкните по слою.')
+                            self.status_text.set('Adobe · RAW-смарт-объект. Для коррекции дважды щёлкните по слою.')
                             self.root.after(100, self.scan)
                         elif name in ('open', 'apply'):
                             self.selected = dict(result['target'])
@@ -613,8 +716,15 @@ class Panel:
                         elif name == 'warmup':
                             self.status_text.set('Sony готов. Откройте RAW или выберите его документ в Photoshop.')
                         elif name == 'cleanup':
-                            self.status_text.set('Освобождено %.1f МБ. Неподтверждённых заданий: %d.' %
-                                                 (result['bytes_freed']/1000000, result['skipped']))
+                            self.status_text.set('Освобождено %.1f МБ. Превью Photoshop: %d, вкладок Sony: %d. %s%s' %
+                                (result['bytes_freed']/1000000, result['previews_closed'], result['sony_closed'],
+                                 'Кэш Photoshop очищен. ' if result['photoshop_purged'] else '',
+                                 'Часть данных сохранена: ' + '; '.join(result['warnings']) if result['warnings'] else ''))
+                            self.duration_text.set('Очистка кэша: %.1f с' % seconds)
+                            if not self.controller.comparison:
+                                self.document_text.set('Очистка завершена')
+                                self.detail_text.set('Изменённые превью и рабочие проекты не удаляются.')
+                            self.root.after(100, self.scan)
                     self.buttons()
         except queue.Empty:
             pass

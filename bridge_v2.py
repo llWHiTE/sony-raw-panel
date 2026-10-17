@@ -194,6 +194,8 @@ def new_project(source):
     folder.mkdir()
     stat = source.stat()
     digest = base.sha(source)
+    from raw_dimensions import image_size
+    dimensions = image_size(source, oriented=True)
     raw = folder / ('SonyRAW-' + ident + '.ARW')
     shutil.copy2(source, raw)
     if base.sha(raw) != digest or source.stat().st_mtime_ns != stat.st_mtime_ns:
@@ -201,7 +203,7 @@ def new_project(source):
     data = dict(version=2, id=ident, source=str(source), source_sha256=digest,
                 source_size=stat.st_size, source_mtime_ns=stat.st_mtime_ns,
                 raw_size=raw.stat().st_size, raw_mtime_ns=raw.stat().st_mtime_ns,
-                settings=None, created=time.time())
+                settings=None, output_dimensions=list(dimensions), created=time.time())
     atomic_json(folder / 'project.json', data)
     return folder, data
 

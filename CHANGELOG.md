@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 — 2026-10-17
+
+- Fixed DSC04755 portrait orientation: source-relative output sizes now account for EXIF rotations 5–8 before Sony export. Both 100% and 50% comparisons retain the correct 5304:7952 aspect ratio.
+- Adobe resizing is proportional only. Incompatible aspect ratios fail explicitly rather than stretching the image; at most a one-pixel canvas adjustment handles rounding.
+- New projects record orientation-aware full output dimensions for both direct Sony import and comparison-to-full-size workflows.
+- Added a unified **Очистить кэш** button: confirmed disk cache, identified unchanged Photoshop comparison documents, their unchanged Sony RAW tabs, then Photoshop `ALLCACHES`. A clear warning covers global undo-history/clipboard loss; **Больше не показывать** persists only after confirmation and can be re-enabled from the menu.
+- Modified or unidentified previews, active work/recovery, user documents, RAW projects and recipes are retained. Sony preview closure verifies the saved recipe before unloading a tab and restores the prior active tab when possible.
+- Added optional `.cube` Color Lookup layers to Sony/Adobe previews and final documents; default is **Без LUT** every launch. Local library supports importing and removing entries, including initial assets. Operation snapshots preserve a chosen look after library removal.
+- Included eight user-supplied LUTs and `Sony To Leica.xmp` with explicit redistribution permission. XMP is an Adobe-only preset with its own profile/Look table, never misrepresented as a Sony recipe or Camera ST.
+- Added the MIT source license for Alexey Storozhilov, separate creative-asset notices, original CPython/Windows/Tcl/Tk licenses and a runtime manifest. Creative assets/runtime are not relicensed under MIT.
+- Expanded regression tests and native checks for rotated RAW, preview cleanup, LUT/XMP import, full-size output and warning preferences. Release includes this version-history file as an asset.
+
 ## 0.5.0 — 2026-10-17
 
 - Preview resolution is now 100%, 75%, 50% or a saved custom integer percentage (1–100%) of each source ARW's own usable width and height. Dimensions come from TIFF/Exif metadata, not a fixed camera resolution or Sony's last export settings.
