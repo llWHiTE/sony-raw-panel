@@ -27,6 +27,30 @@ class WorkflowTests(unittest.TestCase):
         self.target=dict(document=7,layer=2,project='a'*32,revision='b'*32)
     def tearDown(self):self.temp.cleanup()
 
+    def test_prefetch_does_not_call_sony_or_photoshop_and_is_reused(self):
+        source=Path(self.temp.name)/'source.ARW';source.write_bytes(b'raw')
+        with patch.object(core.bridge,'new_project',return_value=(Path(self.temp.name),{'id':'c'*32})) as create,patch.object(core,'operation',side_effect=AssertionError('No renderer')):
+            first=self.c.prefetch(source)
+            self.assertEqual(self.c.prefetch(source),first)
+            create.assert_called_once()
+            self.assertEqual(self.c._prepared_project(source),'c'*32)
+            source.write_bytes(b'changed')
+            self.assertIsNone(self.c._prepared_project(source))
+        self.assertEqual(self.c.ps.calls,[])
+
+    def test_explicit_edit_profile_is_not_reset_on_apply(self):
+        with patch.object(core,'operation',return_value={}) as operation:
+            self.c.edit(self.target,sony_profile='sony:8')
+            self.assertEqual(operation.call_args.args[0]['sony_profile'],'sony:8')
+        with patch.object(core,'operation',return_value={'unchanged':True}) as operation:
+            self.c.apply()
+            self.assertNotIn('sony_profile',operation.call_args.args[0])
+
+    def test_default_profile_is_sent_to_initial_sony_operation(self):
+        with patch.object(core,'operation',return_value=dict(project='a'*32,kind='initial',source='source.ARW')) as operation:
+            self.c.open(Path('source.ARW'),first_sony=True)
+            self.assertEqual(operation.call_args.args[0]['sony_profile'],'camera_standard')
+
     def test_first_setup_opens_sony_without_render_or_photoshop(self):
         prepared=dict(project='a'*32,revision='b'*32,kind='initial',source='source.ARW')
         with patch.object(core,'operation',return_value=prepared) as operation:

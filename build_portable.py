@@ -9,7 +9,8 @@ import zipfile
 APP_FILES = (
     'sony_panel.py', 'panel_core.py', 'bridge.py', 'bridge_v2.py', 'sony_windows.py',
     'runtime_paths.py', 'recipe_compare.py', 'app_info.py', 'comparison.py', 'comparison_adobe.py',
-    'preview_settings.py', 'raw_dimensions.py', 'preview_cleanup.py', 'lut_library.py', 'lut_photoshop.jsx',
+    'preview_settings.py', 'raw_dimensions.py', 'preview_cleanup.py', 'lut_library.py', 'lut_profile.py', 'lut_photoshop.jsx',
+    'development_profiles.py', 'profile_catalog.py', 'sony-profile-catalog.json',
     'LICENSE', 'PYTHON_LICENSE.txt', 'TCL_LICENSE.txt', 'TK_LICENSE.txt',
     'panel_photoshop.jsx', 'comparison_photoshop.jsx', 'photoshop_host.ps1',
     'PANEL.md', 'PORTABLE.md', 'THIRD_PARTY_NOTICES.md', 'BENCHMARK.md', 'CHANGELOG.md', 'verification.py',

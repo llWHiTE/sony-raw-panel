@@ -1,6 +1,6 @@
 """User-editable local CUBE library; selected LUTs are snapshotted per operation."""
 import hashlib
-import math
+import uuid
 from pathlib import Path
 import shutil
 import xml.etree.ElementTree as ET
@@ -54,29 +54,34 @@ def validate(path):
     if path.suffix.lower() == '.xmp':
         xmp_tree(path)
         return hashlib.sha256(path.read_bytes()).hexdigest()
-    size = None
-    rows = 0
-    for raw in path.read_text(encoding='utf-8-sig').splitlines():
-        line = raw.split('#', 1)[0].strip()
-        if not line or line.startswith('TITLE '):
-            continue
-        parts = line.split()
-        if parts[0] == 'LUT_3D_SIZE':
-            if size is not None or len(parts) != 2:
-                raise ValueError('Неверный LUT_3D_SIZE.')
-            size = int(parts[1])
-            if not 2 <= size <= 128:
-                raise ValueError('Поддерживается 3D LUT размером 2–128.')
-        elif parts[0] in ('DOMAIN_MIN', 'DOMAIN_MAX'):
-            if len(parts) != 4 or not all(math.isfinite(float(v)) for v in parts[1:]):
-                raise ValueError('Неверный диапазон LUT.')
-        else:
-            if len(parts) != 3 or not all(math.isfinite(float(v)) for v in parts):
-                raise ValueError('Поддерживаются трёхмерные .cube LUT.')
-            rows += 1
-    if size is None or rows != size ** 3:
-        raise ValueError('Число строк не соответствует размеру 3D LUT.')
+    from lut_profile import read_cube
+    read_cube(path)
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def prepare_lut(selection, root):
+    if not selection or selection.get('kind') != 'cube':
+        return selection
+    from lut_profile import compile_profile, VERSION
+    path = Path(selection['path'])
+    digest = validate(path)
+    if selection.get('sha256') and selection['sha256'] != digest:
+        raise ValueError('Сохранённая копия LUT повреждена.')
+    folder = Path(root) / 'lut-profiles'
+    folder.mkdir(exist_ok=True)
+    profile = folder / ('%s-v%d.icc' % (digest, VERSION))
+    # Reuse only a verified profile; old sessions without one are upgraded here.
+    expected = selection.get('profile_sha256')
+    if not expected or not profile.is_file() or hashlib.sha256(profile.read_bytes()).hexdigest() != expected:
+        contents = compile_profile(path)
+        temporary = folder / (uuid.uuid4().hex + '.tmp')
+        try:
+            temporary.write_bytes(contents)
+            temporary.replace(profile)
+        finally:
+            temporary.unlink(missing_ok=True)
+        expected = hashlib.sha256(contents).hexdigest()
+    return dict(selection, profile=str(profile), profile_sha256=expected, sha256=digest)
 
 
 class Library:
@@ -125,4 +130,4 @@ class Library:
             shutil.copy2(path, target)
         if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
             raise ValueError('Сохранённая копия LUT повреждена.')
-        return dict(path=str(target), name=path.stem, sha256=digest, kind=path.suffix.lower().lstrip('.'))
+        return prepare_lut(dict(path=str(target), name=path.stem, sha256=digest, kind=path.suffix.lower().lstrip('.')), self.root)

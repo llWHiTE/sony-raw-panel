@@ -74,7 +74,11 @@ class Photoshop:
             return response['value']
 
     def call(self, action, data=None, start=False):
-        script = 'sonyPanelCall(%s, %s);' % (json.dumps(action), json.dumps(data or {}, ensure_ascii=True))
+        from lut_library import prepare_lut
+        data = dict(data or {})
+        if data.get('lut'):
+            data['lut'] = prepare_lut(data['lut'], ROOT)
+        script = 'sonyPanelCall(%s, %s);' % (json.dumps(action), json.dumps(data, ensure_ascii=True))
         response = self.evaluate(script, start=start)
         if response is None:
             return {'running': False, 'targets': []}
@@ -130,6 +134,8 @@ class Controller:
         self.last_render = None
         self.recovery = None
         self.comparison = None
+        self.prefetched = None
+        self.catalog = None
         self.session = Path(session) if session else ROOT / 'panel-session.json'
         try:
             state = json.loads(self.session.read_text(encoding='utf-8'))
@@ -147,6 +153,10 @@ class Controller:
                 bridge.atomic_json(folder / 'comparison.json', self.comparison)
 
     def compare_call(self, action, data, start=True):
+        from lut_library import prepare_lut
+        data = dict(data)
+        if data.get('lut'):
+            data['lut'] = prepare_lut(data['lut'], ROOT)
         script = '$.evalFile(new File(%s)); sonyCompareCall(%s, %s);' % (
             json.dumps(str(BUNDLE / 'comparison_photoshop.jsx')), json.dumps(action), json.dumps(data, ensure_ascii=True))
         response = self.ps.evaluate(script, start=start, timeout=300)
@@ -159,7 +169,47 @@ class Controller:
             raise RuntimeError(result.get('error', 'Comparison failed'))
         return result
 
-    def compare(self, source, percent=50, lut=None):
+    def source_signature(self, source):
+        source = Path(source).resolve(strict=True)
+        stat = source.stat()
+        return [str(source), stat.st_size, stat.st_mtime_ns]
+
+    def profile_catalog(self, source, refresh=False):
+        from profile_catalog import catalog
+        self.catalog = catalog(source, ROOT, BUNDLE, refresh=refresh)
+        return self.catalog
+
+    def prefetch(self, source, engine='sony'):
+        signature = self.source_signature(source)
+        current = self.prefetched
+        if current and current['signature'] == signature and current['engine'] == engine:
+            return current
+        started = time.monotonic()
+        if engine == 'sony':
+            bridge.PROJECTS.mkdir(exist_ok=True)
+            _, data = bridge.new_project(source)
+            prepared = dict(project=data['id'])
+        else:
+            from comparison_adobe import adobe_copy
+            folder = ROOT / 'adobe-projects' / uuid.uuid4().hex
+            folder.mkdir(parents=True)
+            private = adobe_copy(folder, Path(source), folder.name)
+            digest = bridge.base.sha(private)
+            bridge.atomic_json(folder / 'project.json', dict(source=str(source), engine='adobe', sha256=digest))
+            stat = private.stat()
+            prepared = dict(adobe=str(private), raw_size=stat.st_size, raw_mtime_ns=stat.st_mtime_ns, sha256=digest)
+        if self.source_signature(source) != signature:
+            raise ValueError('RAW изменился во время фоновой подготовки.')
+        self.prefetched = dict(prepared, signature=signature, engine=engine, seconds=round(time.monotonic()-started, 2))
+        return self.prefetched
+
+    def _prepared_project(self, source):
+        prepared = self.prefetched
+        if prepared and prepared['engine'] == 'sony' and prepared['signature'] == self.source_signature(source):
+            return prepared['project']
+        return None
+
+    def compare(self, source, percent=50, lut=None, adobe_profile='camera_standard', sony_profile='camera_standard'):
         from preview_settings import validate_percent
         percent = validate_percent(percent)
         started = time.monotonic()
@@ -172,6 +222,8 @@ class Controller:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
+        from development_profiles import resolve_adobe
+        resolved_profile = resolve_adobe(source, adobe_profile)
         comparison = load('comparison')
         adobe = load('comparison_adobe')
         self.notify('Готовлю уменьшенное сравнение Sony / Adobe…')
@@ -180,16 +232,23 @@ class Controller:
         try:
             if not handle or error == 183:
                 raise RuntimeError('Другая операция Sony уже выполняется.')
-            state = comparison.prepare(Path(source), percent, self.notify)
+            state = comparison.prepare(Path(source), percent, self.notify, sony_profile=sony_profile, project=self._prepared_project(source))
         finally:
             if handle:
                 bridge.w.k.CloseHandle(handle)
-        self.notify('Adobe: Camera ST, баланс белого «Как снято»…')
+        self.notify('Adobe: %s, баланс белого «Как снято»…' % resolved_profile['label'])
         project_folder, project_data = bridge.project(state['project'])
         state['adobe'] = str(adobe.adobe_copy(Path(state['directory']), bridge.validate_raw(project_folder, project_data), state['id'], project_data['source_sha256']))
         from lut_library import apply_xmp
         state['lut'] = lut
-        state['adobeProfile'] = apply_xmp(state['adobe'], lut)
+        apply_xmp(state['adobe'], lut)
+        from development_profiles import apply_adobe_profile
+        apply_adobe_profile(state['adobe'], resolved_profile)
+        state['adobeProfile'] = resolved_profile['camera_profile']
+        state['adobeLook'] = resolved_profile.get('look_name')
+        state['adobeLookUUID'] = resolved_profile.get('look_uuid')
+        state['adobeProfileLabel'] = resolved_profile['label']
+        state['adobeProfileID'] = adobe_profile
         self.comparison = state
         self.save_session()
         result = self.compare_call('build', state)
@@ -353,8 +412,15 @@ class Controller:
         status = self.ps.call('status')
         for target in status.get('targets', []):
             try:
-                _, data = bridge.project(target['project'])
+                folder, data = bridge.project(target['project'])
                 target['source'] = data['source']
+                target['sony_profile'] = data.get('sony_profile')
+                if self.catalog is None and Path(data['source']).is_file():
+                    try:
+                        from profile_catalog import catalog
+                        target['profile_catalog'] = catalog(data['source'], ROOT, BUNDLE)
+                    except (OSError, ValueError):
+                        pass
             except (OSError, ValueError):
                 target['source'] = '(проект недоступен)'
         return status
@@ -371,17 +437,17 @@ class Controller:
         except Exception:
             return False
 
-    def open(self, source, first_sony=False, engine='sony', lut=None):
+    def open(self, source, first_sony=False, engine='sony', lut=None, adobe_profile='camera_standard', sony_profile='camera_standard'):
         started = time.monotonic()
         if self.pending or self.recovery or self.comparison:
             raise RuntimeError('Сначала завершите текущую проявку или повторите импорт. Неоконченная коррекция не будет заменена другим RAW.')
         if engine == 'adobe':
-            return self.open_adobe(source, lut=lut)
+            return self.open_adobe(source, lut=lut, profile=adobe_profile)
         if lut and lut.get('kind') == 'xmp':
             raise ValueError('XMP-пресет работает только в Adobe. Выберите Adobe или обычный .cube LUT для Sony.')
         if first_sony:
             self.notify('Открываю RAW в Sony без промежуточной проявки…')
-            target = operation(dict(action='prepare', source=str(source)))
+            target = operation(dict(action='prepare', source=str(source), sony_profile=sony_profile, project=self._prepared_project(source)))
             target['lut'] = lut
             target['prepare_seconds'] = round(time.monotonic()-started, 2)
             self.pending = target
@@ -390,7 +456,7 @@ class Controller:
         self.notify('Подключаю Photoshop…')
         self.ps.call('status', start=True)
         self.notify('Sony проявляет RAW. При первом запуске это дольше…')
-        render = operation(dict(action='open', source=str(source)))
+        render = operation(dict(action='open', source=str(source), sony_profile=sony_profile, project=self._prepared_project(source)))
         render.update(source=str(source), sourceName=Path(source).name, lut=lut)
         self.last_render = render
         self.notify('Встраиваю результат в Photoshop…')
@@ -404,36 +470,56 @@ class Controller:
         self.ps.foreground()
         return dict(target=target, cleaned=cleaned, seconds=round(time.monotonic()-started, 2))
 
-    def open_adobe(self, source, lut=None):
+    def open_adobe(self, source, lut=None, profile='camera_standard'):
         spec = importlib.util.spec_from_file_location('comparison_adobe', BUNDLE / 'comparison_adobe.py')
         adobe = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(adobe)
         source = Path(source).resolve(strict=True)
         if source.suffix.lower() != '.arw':
             raise ValueError('Выберите Sony ARW.')
-        folder = ROOT / 'adobe-projects' / uuid.uuid4().hex
-        folder.mkdir(parents=True)
+        from development_profiles import resolve_adobe, apply_adobe_profile
+        resolved = resolve_adobe(source, profile)
         started = time.monotonic()
-        self.notify('Открываю RAW в Adobe Camera Raw — Camera ST…')
-        private = adobe.adobe_copy(folder, source, folder.name)
-        bridge.atomic_json(folder / 'project.json', dict(source=str(source), engine='adobe',
-                          sha256=bridge.base.sha(private), profile='Camera ST'))
+        self.notify('Открываю RAW в Adobe Camera Raw — %s…' % resolved['label'])
+        prepared = self.prefetched
+        if prepared and prepared['engine'] == 'adobe' and prepared['signature'] == self.source_signature(source):
+            private = Path(prepared['adobe'])
+            folder = private.parent
+            stat = private.stat()
+            if private.is_symlink() or stat.st_nlink != 1 or stat.st_size != prepared['raw_size'] or stat.st_mtime_ns != prepared['raw_mtime_ns']:
+                raise ValueError('Рабочая копия Adobe изменилась. Добавьте RAW заново.')
+            # Reset only the sidecar: the background RAW copy was already verified.
+            adobe.write_sidecar(private)
+        else:
+            folder = ROOT / 'adobe-projects' / uuid.uuid4().hex
+            folder.mkdir(parents=True)
+            private = adobe.adobe_copy(folder, source, folder.name)
         from lut_library import apply_xmp
-        profile = apply_xmp(private, lut)
-        result = self.compare_call('adobeFull', dict(adobe=str(private), source=str(source), lut=lut, adobeProfile=profile))
+        apply_xmp(private, lut)
+        apply_adobe_profile(private, resolved)
+        bridge.atomic_json(folder / 'project.json', dict(source=str(source), engine='adobe',
+                          sha256=prepared['sha256'] if prepared and prepared.get('adobe') == str(private) else bridge.base.sha(private), profile=resolved))
+        result = self.compare_call('adobeFull', dict(adobe=str(private), source=str(source), lut=lut,
+            adobeProfile=resolved['camera_profile'], adobeLook=resolved.get('look_name'),
+            adobeLookUUID=resolved.get('look_uuid'), adobeProfileLabel=resolved['label']))
         self.ps.foreground()
         result.update(engine='adobe', seconds=round(time.monotonic()-started, 2))
         return result
 
-    def edit(self, target):
+    def edit(self, target, sony_profile=None):
         if self.pending:
             if same_target(self.pending, target):
                 return operation(dict(action='edit', project=target['project'], revision=target.get('revision')))
             raise RuntimeError('Уже изменяется другой снимок. Сначала примените его проявку.')
         self.ps.call('validate', target)
         self.notify('Открываю RAW и его рецепт в Sony…')
-        result = operation(dict(action='edit', project=target['project'], revision=target.get('revision')))
+        request = dict(action='edit', project=target['project'], revision=target.get('revision'))
+        if sony_profile is not None:
+            request['sony_profile'] = sony_profile
+        result = operation(request)
         self.pending = dict(target)
+        if sony_profile is not None:
+            self.pending['sony_profile'] = sony_profile
         self.completed = None
         self.save_session()
         return result

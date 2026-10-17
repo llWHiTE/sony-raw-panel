@@ -1,5 +1,47 @@
 """Read the usable image dimensions from each Sony ARW's TIFF/Exif metadata."""
 import struct
+import re
+
+
+def camera_model(path):
+    with open(path, 'rb') as file:
+        file.seek(0, 2)
+        size = file.tell()
+        def read(offset, length):
+            if offset < 0 or length < 0 or offset + length > size:
+                raise ValueError('Повреждены метаданные модели ARW.')
+            file.seek(offset)
+            value = file.read(length)
+            if len(value) != length:
+                raise ValueError('Не удалось прочитать модель камеры.')
+            return value
+        header = read(0, 8)
+        if header[:2] not in (b'II', b'MM'):
+            raise ValueError('Файл ARW не содержит TIFF-метаданные.')
+        endian = '<' if header[:2] == b'II' else '>'
+        magic, offset = struct.unpack(endian + 'HI', header[2:])
+        if magic != 42:
+            raise ValueError('Неподдерживаемые метаданные ARW.')
+        count = struct.unpack(endian + 'H', read(offset, 2))[0]
+        if count > 4096:
+            raise ValueError('Слишком большой каталог ARW.')
+        entries = read(offset + 2, count * 12)
+        models = []
+        for i in range(count):
+            entry = entries[i * 12:(i + 1) * 12]
+            tag, kind, length = struct.unpack(endian + 'HHI', entry[:8])
+            if tag != 272:
+                continue
+            if kind != 2 or not 2 <= length <= 128:
+                raise ValueError('Неверная модель камеры в ARW.')
+            data = entry[8:8 + length] if length <= 4 else read(struct.unpack(endian + 'I', entry[8:])[0], length)
+            value = data.rstrip(b'\0').decode('ascii').strip()
+            if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _-]{0,100}', value):
+                raise ValueError('Неверная модель камеры в ARW.')
+            models.append(value)
+        if len(models) == 1:
+            return models[0]
+    raise ValueError('В ARW не найдена однозначная модель камеры.')
 
 
 def image_size(path, oriented=False):

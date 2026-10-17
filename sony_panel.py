@@ -17,6 +17,7 @@ if str(SOURCE) not in sys.path:
 import runtime_paths as runtime
 from app_info import AUTHOR, GITHUB_URL, VERSION
 import preview_settings as preview
+import development_profiles as profiles
 ROOT = runtime.data_root()
 BUNDLE = runtime.bundle_root()
 spec = importlib.util.spec_from_file_location('panel_core', BUNDLE / 'panel_core.py')
@@ -46,7 +47,7 @@ class Panel:
         root.title(TITLE)
         root.geometry('440x720+%d+40' % max(20, root.winfo_screenwidth()-480))
         root.minsize(380, 480)
-        root.configure(bg='#20242c')
+        root.configure(bg='#262626')
         root.attributes('-topmost', True)
         root.protocol('WM_DELETE_WINDOW', self.close)
         self.status_text = tk.StringVar(value='Подключение к Photoshop…')
@@ -68,6 +69,14 @@ class Panel:
         self.first_sony = tk.BooleanVar(value=bool(prefs.get('first_sony', False)))
         self.pinned = tk.BooleanVar(value=bool(prefs.get('pinned', True)))
         self.cleanup_warning = tk.BooleanVar(value=bool(prefs.get('cleanup_warning', True)))
+        self.source_catalog = None
+        self.prefetching = False
+        self.sony_profile_override = None
+        self.profile_preferences = prefs.get('camera_profiles', {}) if isinstance(prefs.get('camera_profiles'), dict) else {}
+        self.adobe_profile = tk.StringVar(value='Camera Standard')
+        self.sony_profile = tk.StringVar(value='Camera Standard')
+        self.source_text = tk.StringVar(value='Добавьте RAW — профили определятся без проявки')
+        self.preparation_text = tk.StringVar(value='')
         from lut_library import Library
         self.lut_library = Library(ROOT, BUNDLE)
         self.lut_text = tk.StringVar(value='Без LUT')
@@ -90,23 +99,31 @@ class Panel:
     def build(self):
         style = ttk.Style()
         style.theme_use('clam')
-        style.configure('Sony.TFrame', background='#20242c')
-        style.configure('Sony.TLabel', background='#20242c', foreground='#e5e7eb', font=('Segoe UI', 10))
-        style.configure('Muted.TLabel', background='#20242c', foreground='#aeb7c6', font=('Segoe UI', 9))
-        style.configure('Heading.TLabel', background='#20242c', foreground='#ffffff', font=('Segoe UI Semibold', 17))
-        style.configure('Sony.TButton', background='#303845', foreground='#e5e7eb', bordercolor='#454f60', font=('Segoe UI', 10), padding=(10, 8))
-        style.map('Sony.TButton', background=[('disabled', '#272d36'), ('active', '#414e61')], foreground=[('disabled', '#7e8999')])
-        style.configure('Accent.TButton', background='#5393ce', foreground='#ffffff', font=('Segoe UI Semibold', 11), padding=(10, 10))
-        style.map('Accent.TButton', background=[('disabled', '#303845'), ('active', '#67a3db')], foreground=[('disabled', '#7e8999')])
-        style.configure('Sony.TCheckbutton', background='#20242c', foreground='#aeb7c6', font=('Segoe UI', 9))
-        style.map('Sony.TCheckbutton', background=[('active', '#20242c')], foreground=[('disabled', '#7e8999')])
+        style.configure('Sony.TFrame', background='#262626')
+        style.configure('Sony.TLabel', background='#262626', foreground='#e0e0e0', font=('Segoe UI', 10))
+        style.configure('Muted.TLabel', background='#262626', foreground='#b5b5b5', font=('Segoe UI', 9))
+        style.configure('Heading.TLabel', background='#262626', foreground='#ffffff', font=('Segoe UI Semibold', 16))
+        style.configure('Sony.TButton', background='#393939', foreground='#e0e0e0', bordercolor='#555555', font=('Segoe UI', 9), padding=(10, 6))
+        style.map('Sony.TButton', background=[('disabled', '#303030'), ('active', '#4a4a4a')], foreground=[('disabled', '#858585')])
+        style.configure('Accent.TButton', background='#1473e6', foreground='#ffffff', font=('Segoe UI Semibold', 10), padding=(10, 8))
+        style.map('Accent.TButton', background=[('disabled', '#393939'), ('active', '#2680eb')], foreground=[('disabled', '#858585')])
+        style.configure('Sony.TCombobox', fieldbackground='#3b3b3b', background='#444444', foreground='#e0e0e0', arrowcolor='#b5b5b5', bordercolor='#555555', padding=3)
+        style.map('Sony.TCombobox', fieldbackground=[('disabled', '#303030'), ('readonly', '#3b3b3b')],
+                  foreground=[('disabled', '#858585'), ('readonly', '#e0e0e0')],
+                  selectbackground=[('readonly', '#3b3b3b')], selectforeground=[('readonly', '#e0e0e0')])
+        self.root.option_add('*TCombobox*Listbox.background', '#333333')
+        self.root.option_add('*TCombobox*Listbox.foreground', '#e0e0e0')
+        self.root.option_add('*TCombobox*Listbox.selectBackground', '#1473e6')
+        style.configure('Sony.Horizontal.TProgressbar', troughcolor='#333333', background='#1473e6', bordercolor='#333333', lightcolor='#1473e6', darkcolor='#1473e6', thickness=4)
+        style.configure('Sony.TCheckbutton', background='#262626', foreground='#b5b5b5', font=('Segoe UI', 9))
+        style.map('Sony.TCheckbutton', background=[('active', '#262626')], foreground=[('disabled', '#858585')])
         footer = ttk.Frame(self.root, padding=(18, 8, 18, 12), style='Sony.TFrame')
         footer.pack(side='bottom', fill='x')
         row = ttk.Frame(footer, style='Sony.TFrame')
         row.pack(fill='x')
         ttk.Checkbutton(row, text='Поверх окон', variable=self.pinned, style='Sony.TCheckbutton',
                         command=lambda: self.root.attributes('-topmost', self.pinned.get())).pack(side='left')
-        self.tools = tk.Menubutton(row, text='⋯', bg='#20242c', fg='#d8dce4', relief='flat', font=('Segoe UI', 13))
+        self.tools = tk.Menubutton(row, text='⋯', bg='#262626', fg='#d6d6d6', relief='flat', font=('Segoe UI', 13))
         self.tools.pack(side='right')
         self.cleanup_button = ttk.Button(row, text='Очистить кэш', style='Sony.TButton', command=self.cleanup)
         self.cleanup_button.pack(side='right', padx=(6, 10))
@@ -123,13 +140,13 @@ class Panel:
         credit = ttk.Frame(footer, style='Sony.TFrame')
         credit.pack(fill='x', pady=(8, 0))
         ttk.Label(credit, text=AUTHOR, style='Muted.TLabel').pack(side='left')
-        link = tk.Label(credit, text='GitHub ↗', fg='#81b8ec', bg='#20242c', cursor='hand2', font=('Segoe UI', 9))
+        link = tk.Label(credit, text='GitHub ↗', fg='#83baff', bg='#262626', cursor='hand2', font=('Segoe UI', 9))
         link.pack(side='right')
         link.bind('<Button-1>', lambda _: self.github())
 
         area = ttk.Frame(self.root, style='Sony.TFrame')
         area.pack(fill='both', expand=True)
-        self.canvas = tk.Canvas(area, bg='#20242c', highlightthickness=0, borderwidth=0)
+        self.canvas = tk.Canvas(area, bg='#262626', highlightthickness=0, borderwidth=0)
         scrollbar = ttk.Scrollbar(area, orient='vertical', command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side='right', fill='y')
@@ -150,6 +167,9 @@ class Panel:
             return widget
         ttk.Label(frame, text='Sony RAW', style='Heading.TLabel').pack(anchor='w')
         ttk.Label(frame, text='Проявка Sony и Adobe в Photoshop', style='Muted.TLabel').pack(anchor='w', pady=(2, 14))
+        self.add_button = ttk.Button(frame, text='Добавить RAW…', style='Sony.TButton', command=self.add_source)
+        self.add_button.pack(fill='x', pady=(0, 6))
+        label(self.source_text, 'Muted.TLabel', (0, 8))
         engine_row = ttk.Frame(frame, style='Sony.TFrame')
         engine_row.pack(fill='x', pady=(0, 6))
         ttk.Label(engine_row, text='Проявка при открытии:', style='Muted.TLabel').pack(side='left')
@@ -157,6 +177,16 @@ class Panel:
         self.engine_choice.pack(side='right')
         self.first_check = ttk.Checkbutton(frame, text='Сначала настроить в Sony', variable=self.first_sony, style='Sony.TCheckbutton')
         self.first_check.pack(anchor='w', pady=(0, 10))
+        for title, variable, attribute in (('Профиль Adobe:', self.adobe_profile, 'adobe_profile_choice'),
+                                            ('Профиль Sony:', self.sony_profile, 'sony_profile_choice')):
+            profile_row = ttk.Frame(frame, style='Sony.TFrame')
+            profile_row.pack(fill='x', pady=(0, 6))
+            ttk.Label(profile_row, text=title, style='Muted.TLabel').pack(side='left')
+            choice = ttk.Combobox(profile_row, textvariable=variable, values=['Camera Standard'], state='readonly', width=23)
+            choice.pack(side='right', fill='x', expand=True, padx=(8, 0))
+            choice.bind('<<ComboboxSelected>>', self.profile_changed)
+            setattr(self, attribute, choice)
+        label(self.preparation_text, 'Muted.TLabel', (0, 6))
         lut_row = ttk.Frame(frame, style='Sony.TFrame')
         lut_row.pack(fill='x', pady=(0, 8))
         ttk.Label(lut_row, text='LUT / XMP:', style='Muted.TLabel').pack(side='left')
@@ -165,7 +195,7 @@ class Panel:
         self.lut_manage = ttk.Button(lut_row, text='…', style='Sony.TButton', width=3, command=self.manage_luts)
         self.lut_manage.pack(side='right')
         self.engine.trace_add('write', lambda *_: self.buttons())
-        self.open_button = ttk.Button(frame, text='Открыть RAW…', style='Sony.TButton', command=self.choose)
+        self.open_button = ttk.Button(frame, text='Открыть в Photoshop', style='Sony.TButton', command=self.choose)
         self.open_button.pack(fill='x')
         quality_row = ttk.Frame(frame, style='Sony.TFrame')
         quality_row.pack(fill='x', pady=(12, 6))
@@ -189,7 +219,9 @@ class Panel:
         self.apply_button = ttk.Button(frame, text='Применить в Photoshop', style='Accent.TButton', command=self.apply)
         self.apply_button.pack(fill='x')
         self.cancel_button = ttk.Button(frame, text='Отменить проявку', style='Sony.TButton', command=self.cancel)
-        self.bar = ttk.Progressbar(frame, mode='indeterminate', length=280)
+        for combo in (self.engine_choice, self.adobe_profile_choice, self.sony_profile_choice, self.lut_choice, self.quality, self.combo):
+            combo.configure(style='Sony.TCombobox')
+        self.bar = ttk.Progressbar(frame, mode='indeterminate', length=280, style='Sony.Horizontal.TProgressbar')
         self.bar.pack(fill='x', pady=(12, 6))
         self.status_label = label(self.status_text, 'Muted.TLabel', (0, 4))
         label(self.duration_text, 'Sony.TLabel', (3, 0))
@@ -302,7 +334,7 @@ class Panel:
         core.bridge.atomic_json(ROOT / 'ui-preferences.json', dict(engine=self.engine.get(),
             first_sony=self.first_sony.get(), preview_percent=self.preview_percent,
             preview_mode=self.preview_mode, custom_percent=self.custom_percent, pinned=self.pinned.get(),
-            cleanup_warning=self.cleanup_warning.get()))
+            cleanup_warning=self.cleanup_warning.get(), camera_profiles=self.profile_preferences))
 
     def startup(self):
         # Capture Tk values on the UI thread.
@@ -428,7 +460,7 @@ class Panel:
         self.opening_seconds = pending.get('prepare_seconds', 0) if name == 'apply' and not recovery else 0
         self.retrying_import = name == 'apply' and bool(recovery)
         self.last_error = None
-        self.status_label.configure(foreground='#aeb7c6')
+        self.status_label.configure(foreground='#b5b5b5')
         self.status_text.set('Выполняю…')
         self.bar.start(12)
         self.buttons()
@@ -441,6 +473,9 @@ class Panel:
         recovery = self.controller.recovery
         comparison = self.controller.comparison
         free = idle and not pending and not recovery and not comparison
+        self.add_button.configure(state='normal' if free and not self.prefetching else 'disabled')
+        self.adobe_profile_choice.configure(state='readonly' if free and self.source_catalog and self.source_catalog['adobe'] else 'disabled')
+        self.sony_profile_choice.configure(state='readonly' if free and self.source_catalog else 'disabled')
         self.engine_choice.configure(state='readonly' if free else 'disabled')
         self.lut_choice.configure(state='readonly' if free else 'disabled')
         self.lut_manage.configure(state='normal' if free else 'disabled')
@@ -466,7 +501,9 @@ class Panel:
             self.document_text.set('Сравнение: ' + size + pixels)
             look = comparison.get('lut')
             note = (' XMP только Adobe: ' if look.get('kind') == 'xmp' else ' LUT: ') + look['name'] if look else ''
-            self.detail_text.set('Переключайте одной кнопкой. Выбранная проявка откроется в полном разрешении.' + note)
+            sony_label = comparison.get('sonyProfile', {}).get('label', 'сохранённый рецепт')
+            adobe_label = comparison.get('adobeProfileLabel', comparison.get('adobeProfile', 'Camera Standard'))
+            self.detail_text.set('Sony: %s · Adobe: %s. Профили сохранятся в полном размере.%s' % (sony_label, adobe_label, note))
         else:
             self.compare_frame.pack_forget()
             if not self.edit_button.winfo_manager():
@@ -491,16 +528,73 @@ class Panel:
         else:
             self.combo.pack_forget()
         self.combo.configure(state='readonly' if idle and not pending and not recovery and len(self.targets)>1 else 'disabled')
+        if not self.selected and not pending and not recovery and not comparison:
+            self.edit_button.pack_forget()
+            self.apply_button.pack_forget()
+
+    def selected_profiles(self):
+        result = {}
+        for engine, variable in (('adobe', self.adobe_profile), ('sony', self.sony_profile)):
+            options = (self.source_catalog or {}).get(engine, [])
+            selected = next((item['id'] for item in options if item['label'] == variable.get()), profiles.DEFAULT)
+            result[engine + '_profile'] = selected
+        return result
+
+    def set_catalog(self, catalog):
+        previous = self.selected_profiles() if self.source_catalog and self.source_catalog['model'] == catalog['model'] else {}
+        self.source_catalog = catalog
+        stored = self.profile_preferences.get(catalog['model'], {})
+        if not isinstance(stored, dict):
+            stored = {}
+        for engine, variable, choice in (('adobe', self.adobe_profile, self.adobe_profile_choice),
+                                        ('sony', self.sony_profile, self.sony_profile_choice)):
+            options = catalog[engine]
+            desired = previous.get(engine + '_profile', stored.get(engine, profiles.DEFAULT))
+            selected = next((item for item in options if item['id'] == desired), None)
+            selected = selected or next((item for item in options if item['id'] == profiles.DEFAULT), None)
+            variable.set(selected['label'] if selected else 'Профили не установлены')
+            choice.configure(values=[item['label'] for item in options])
+        self.source_text.set('%s · %s' % (Path(catalog['source']).name, catalog['model']))
+        self.sony_profile_override = None
+        self.preparation_text.set('Профили: %.0f мс%s. %s' % (catalog['seconds'] * 1000,
+            ' · кэш' if catalog['cached'] else '', catalog['sony_origin']))
+
+    def profile_changed(self, event=None):
+        if self.source_catalog:
+            selected = self.selected_profiles()
+            self.profile_preferences[self.source_catalog['model']] = dict(adobe=selected['adobe_profile'], sony=selected['sony_profile'])
+            if event is not None and event.widget == self.sony_profile_choice:
+                self.sony_profile_override = selected['sony_profile']
+            self.save_preferences()
+
+    def add_source(self):
+        if self.busy or self.controller.pending or self.controller.recovery or self.controller.comparison:
+            return
+        path = filedialog.askopenfilename(parent=self.root, title='Добавить Sony RAW без проявки', filetypes=[('Sony RAW', '*.arw *.ARW')])
+        if path:
+            self.stage_source(path)
+
+    def stage_source(self, path):
+        engine = self.engine.get().lower()
+        def work():
+            catalog = self.controller.profile_catalog(Path(path))
+            catalog['prefetch_engine'] = engine
+            return catalog
+        self.submit('profiles', work)
 
     def choose(self):
         if self.busy or self.controller.pending or self.controller.recovery or self.controller.comparison:
             return
-        path = filedialog.askopenfilename(parent=self.root, title='Открыть Sony RAW',
-                                          filetypes=[('Sony RAW', '*.arw *.ARW')])
-        if path:
-            self.open_path(path)
+        if self.source_catalog:
+            self.open_path(self.source_catalog['source'])
+        else:
+            self.add_source()
 
     def open_path(self, path):
+        if not self.source_catalog or Path(self.source_catalog['source']).resolve() != Path(path).resolve():
+            self.stage_source(path)
+            return
+        selected_profiles = self.selected_profiles()
         first_sony = self.first_sony.get()
         engine = self.engine.get().lower()
         try:
@@ -508,7 +602,7 @@ class Panel:
         except (OSError, ValueError) as error:
             self.status_text.set(str(error))
             return
-        self.submit('open', lambda: self.controller.open(Path(path), first_sony=first_sony, engine=engine, lut=lut))
+        self.submit('open', lambda: self.controller.open(Path(path), first_sony=first_sony, engine=engine, lut=lut, **selected_profiles))
 
     def compare(self):
         if self.busy or self.controller.pending or self.controller.recovery:
@@ -517,15 +611,19 @@ class Panel:
             engine = 'adobe' if self.controller.comparison.get('shown', 'sony') == 'sony' else 'sony'
             self.show_compare(engine)
             return
-        source = filedialog.askopenfilename(parent=self.root, title='Сравнить Sony / Adobe Camera ST', filetypes=[('Sony RAW', '*.arw *.ARW')])
+        if not self.source_catalog:
+            self.add_source()
+            return
+        source = self.source_catalog['source']
         if source:
+            selected_profiles = self.selected_profiles()
             percent = self.preview_percent
             try:
                 lut = self.selected_lut()
             except (OSError, ValueError) as error:
                 self.status_text.set(str(error))
                 return
-            self.submit('compare', lambda: self.controller.compare(Path(source), percent, lut=lut))
+            self.submit('compare', lambda: self.controller.compare(Path(source), percent, lut=lut, **selected_profiles))
 
     def show_compare(self, engine):
         self.submit('compare_show', lambda: self.controller.show_comparison(engine))
@@ -558,7 +656,8 @@ class Panel:
     def edit(self):
         target = self.controller.pending or self.selected
         if target:
-            self.submit('edit', lambda: self.controller.edit(dict(target)))
+            selected_profile = self.sony_profile_override
+            self.submit('edit', lambda: self.controller.edit(dict(target), sony_profile=selected_profile))
 
     def apply(self):
         if self.controller.recovery:
@@ -608,7 +707,7 @@ class Panel:
             self.submit('defer', self.controller.defer)
 
     def scan(self):
-        if not self.closed and not self.busy and not self.scanning and not self.controller.pending and not self.controller.recovery and not self.controller.comparison:
+        if not self.closed and not self.busy and not self.prefetching and not self.scanning and not self.controller.pending and not self.controller.recovery and not self.controller.comparison:
             self.scanning = True
             self.jobs.put(('scan', self.controller.status))
 
@@ -623,12 +722,15 @@ class Panel:
         if index >= 0:
             self.combo.current(index)
             self.selected = dict(self.targets[index])
+            if not self.source_catalog and self.selected.get('profile_catalog'):
+                self.set_catalog(self.selected['profile_catalog'])
+                self.controller.catalog = self.selected['profile_catalog']
             self.show_target()
         else:
             self.selected = None
             self.target_text.set('')
             self.document_text.set(result.get('documentName') or ('Нет открытого документа Photoshop' if result.get('running') else 'Photoshop не открыт'))
-            self.detail_text.set('Нажмите «Открыть RAW».' if not self.targets else 'В документе несколько Sony RAW. Выберите нужный в списке.')
+            self.detail_text.set(('Профили готовы. Откройте файл или сравните Sony / Adobe.' if self.source_catalog else 'Добавьте RAW и выберите профили перед открытием.') if not self.targets else 'В документе несколько Sony RAW. Выберите нужный в списке.')
 
     def drain(self):
         try:
@@ -645,6 +747,14 @@ class Panel:
                     self.status_text.set(value)
                 elif event in ('done', 'error'):
                     name, result, seconds = value
+                    if name == 'prefetch':
+                        self.prefetching = False
+                        if event == 'done':
+                            self.preparation_text.set('Рабочая копия готова · %.2f с. Без открытия и проявки.' % seconds)
+                        elif not self.busy:
+                            self.preparation_text.set('Фоновая копия не готова: ' + str(result))
+                        self.buttons()
+                        continue
                     if name == 'scan':
                         self.scanning = False
                         if event == 'done':
@@ -654,6 +764,7 @@ class Panel:
                     else:
                         self.busy = False
                         self.bar.stop()
+                        self.bar.configure(value=0)
                         self.elapsed_text.set('')
                         if name in ('open', 'compare', 'compare_choose', 'apply'):
                             titles = {'open': 'Открытие', 'compare': 'Подготовка сравнения', 'compare_choose': 'Открытие полного размера',
@@ -663,8 +774,14 @@ class Panel:
                                 self.duration_text.set('Открытие и первая проявка: %.1f с\nПрименение: %.1f с · время настройки в Sony не включено' % (self.opening_seconds+seconds, seconds))
                         if event == 'error':
                             self.last_error = result
-                            self.status_label.configure(foreground='#efad96')
+                            self.status_label.configure(foreground='#ff9d9d')
                             self.status_text.set(result)
+                        elif name == 'profiles':
+                            self.set_catalog(result)
+                            self.status_text.set('RAW добавлен без проявки. Выберите профили, затем откройте или сравните.')
+                            self.prefetching = True
+                            source, engine = result['source'], result['prefetch_engine']
+                            self.jobs.put(('prefetch', lambda source=source, engine=engine: self.controller.prefetch(Path(source), engine=engine)))
                         elif name == 'compare':
                             view = result['view']
                             self.status_text.set('Сравнение %d × %d. Переключайте Sony / Adobe и выберите проявщик.' % (view['width'],view['height']))
@@ -725,6 +842,11 @@ class Panel:
                                 self.document_text.set('Очистка завершена')
                                 self.detail_text.set('Изменённые превью и рабочие проекты не удаляются.')
                             self.root.after(100, self.scan)
+                    if event == 'done' and name in ('open', 'compare', 'edit', 'apply') and self.source_catalog:
+                        try:
+                            self.set_catalog(self.controller.profile_catalog(self.source_catalog['source']))
+                        except (OSError, ValueError):
+                            pass
                     self.buttons()
         except queue.Empty:
             pass

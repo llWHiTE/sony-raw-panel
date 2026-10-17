@@ -12,8 +12,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("Alexey Storozhilov")]
 [assembly: AssemblyProduct("Sony RAW Panel")]
 [assembly: AssemblyCopyright("Copyright © 2026 Alexey Storozhilov")]
-[assembly: AssemblyVersion("0.5.1.0")]
-[assembly: AssemblyFileVersion("0.5.1.0")]
+[assembly: AssemblyVersion("0.6.0.0")]
+[assembly: AssemblyFileVersion("0.6.0.0")]
 
 internal static class PortableLauncher
 {
@@ -40,7 +40,7 @@ internal static class PortableLauncher
             string stamp;
             using (Stream payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("SonyRawPayload"))
                 stamp = PayloadHash(payload);
-            string runtime = Path.Combine(data, "runtime-0.5.1-" + stamp);
+            string runtime = Path.Combine(data, "runtime-0.6.0-" + stamp);
             bool created;
             using (var mutex = new Mutex(false, "Local\\SonyRawExtract-" + stamp, out created))
             {

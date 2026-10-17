@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 
 
-def adobe_copy(folder, source, ident, expected_sha=None):
+def adobe_copy(folder, source, ident, expected_sha=None, profile=None):
     if not re.fullmatch(r'[a-f0-9]{32}', ident):
         raise ValueError('Invalid comparison identifier.')
     def digest(path):
@@ -22,7 +22,16 @@ def adobe_copy(folder, source, ident, expected_sha=None):
         shutil.copy2(source, destination)
     if destination.stat().st_nlink != 1 or digest(destination) != expected_sha or source.stat().st_mtime_ns != before.st_mtime_ns:
         raise ValueError('Adobe RAW copy verification failed.')
-    # This sidecar belongs only to an independent comparison copy, never the user's RAW.
+    write_sidecar(destination, profile)
+    return destination
+
+
+def write_sidecar(destination, profile=None):
+    destination = Path(destination)
+    sidecar = destination.with_suffix('.xmp')
+    if destination.is_symlink() or destination.stat().st_nlink != 1 or sidecar.is_symlink() or (sidecar.exists() and sidecar.stat().st_nlink != 1):
+        raise ValueError('Adobe input/sidecar must be independent private files.')
+    # Called only for the panel's verified private RAW, never the user's RAW.
     xmp = '''<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description rdf:about="" xmlns:crs="http://ns.adobe.com/camera-raw-settings/1.0/"
  crs:Version="18.6" crs:ProcessVersion="15.4" crs:WhiteBalance="As Shot"
@@ -33,4 +42,7 @@ def adobe_copy(folder, source, ident, expected_sha=None):
  <crs:ToneCurvePV2012><rdf:Seq><rdf:li>0, 0</rdf:li><rdf:li>255, 255</rdf:li></rdf:Seq></crs:ToneCurvePV2012>
  </rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end="w"?>'''
     destination.with_suffix('.xmp').write_text(xmp, encoding='utf-8')
+    if profile:
+        from development_profiles import apply_adobe_profile
+        apply_adobe_profile(destination, profile)
     return destination

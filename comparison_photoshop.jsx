@@ -19,6 +19,24 @@ function sonyCompareScale(sourceWidth, sourceHeight, width, height) {
     return {width:scaledWidth, height:scaledHeight};
 }
 
+function sonyCompareProfileVerified(metadata, data) {
+    function property(text, name, value) {
+        var escaped = String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp('(?:[\\w.-]+:)?' + name + '\\s*=\\s*["\\\']' + escaped + '["\\\']').test(text) ||
+            new RegExp('<(?:[\\w.-]+:)?' + name + '(?:\\s[^>]*)?>' + escaped + '</(?:[\\w.-]+:)?' + name + '>').test(text);
+    }
+    var base = data.adobeProfile || 'Camera ST';
+    var lookPattern = /<(?:[\w.-]+:)?Look(?:\s[^>]*)?>[\s\S]*?<\/(?:[\w.-]+:)?Look>/;
+    if (!property(metadata.replace(lookPattern, ''), 'CameraProfile', base)) return false;
+    var look = metadata.match(lookPattern);
+    if (data.adobeProfileLabel && !data.adobeLook && look) return false;
+    if (data.adobeLook) {
+        if (!look || !property(look[0], 'Name', data.adobeLook) ||
+            !property(look[0], 'UUID', data.adobeLookUUID)) return false;
+    }
+    return true;
+}
+
 function sonyCompareCall(action, data) {
     var dialogs = app.displayDialogs;
     var adobe = null, sony = null;
@@ -27,7 +45,7 @@ function sonyCompareCall(action, data) {
         if (action === 'build') {
             sony = app.open(new File(data.sony), OpenDocumentType.TIFF);
             var width = sony.width.as('px'), height = sony.height.as('px');
-            sony.activeLayer.name = 'Sony — Imaging Edge';
+            sony.activeLayer.name = 'Sony — ' + (data.sonyProfile ? data.sonyProfile.label : 'Imaging Edge');
             adobe = app.open(new File(data.adobe), sonyCompareOptions(data.edge, false));
             var nativeAdobeSize = [adobe.width.as('px'), adobe.height.as('px')];
             if (nativeAdobeSize[0] < width || nativeAdobeSize[1] < height) {
@@ -40,8 +58,8 @@ function sonyCompareCall(action, data) {
             }
             var adobeMetadata = adobe.xmpMetadata.rawData;
             var expectedProfile = data.adobeProfile || 'Camera ST';
-            var profileVerified = adobeMetadata.indexOf('"' + expectedProfile + '"') >= 0 || adobeMetadata.indexOf('>' + expectedProfile + '<') >= 0;
-            if (!profileVerified) throw new Error('Camera Raw не подтвердил профиль Camera ST. Сравнение отменено, чтобы не показывать неверно подписанный вариант.');
+            var profileVerified = sonyCompareProfileVerified(adobeMetadata, data);
+            if (!profileVerified) throw new Error('Camera Raw не подтвердил выбранный профиль: ' + (data.adobeProfileLabel || expectedProfile));
             if (adobe.colorProfileName !== 'sRGB IEC61966-2.1') {
                 adobe.convertProfile('sRGB IEC61966-2.1', Intent.RELATIVECOLORIMETRIC, true, false);
             }
@@ -54,7 +72,7 @@ function sonyCompareCall(action, data) {
             adobe.close(SaveOptions.DONOTSAVECHANGES); adobe = null;
             app.activeDocument = sony;
             var adobeLayer = sony.activeLayer;
-            adobeLayer.name = 'Adobe — ' + expectedProfile + (data.lut && data.lut.kind === 'xmp' ? ' / ' + data.lut.name : '');
+            adobeLayer.name = 'Adobe — ' + (data.adobeProfileLabel || expectedProfile) + (data.lut && data.lut.kind === 'xmp' ? ' / ' + data.lut.name : '');
             var sonyLayer = sony.layers[1];
             var reference = {document: sony.id, sonyLayer: sonyLayer.id, adobeLayer: adobeLayer.id,
                              width: width, height: height, adobeDecodedSize: nativeAdobeSize, profileVerified: profileVerified, previewID:data.id};
@@ -92,7 +110,7 @@ function sonyCompareCall(action, data) {
             }
             var profile = doc.xmpMetadata.rawData;
             var fullProfile = data.adobeProfile || 'Camera ST';
-            if (profile.indexOf('"' + fullProfile + '"') < 0 && profile.indexOf('>' + fullProfile + '<') < 0) {
+            if (!sonyCompareProfileVerified(profile, data)) {
                 throw new Error('Camera Raw не подтвердил выбранный профиль: ' + fullProfile);
             }
             var actual = [Math.round(doc.width.as('px')), Math.round(doc.height.as('px'))];
@@ -100,11 +118,11 @@ function sonyCompareCall(action, data) {
             if (actual[0] !== expected[0] || actual[1] !== expected[1]) {
                 throw new Error('Camera Raw не выдал полное исходное разрешение: ' + actual.join(' × ') + ', ожидалось ' + expected.join(' × ') + '. Рабочий документ не подтверждён.');
             }
-            doc.activeLayer.name = 'Adobe RAW — ' + fullProfile;
+            doc.activeLayer.name = 'Adobe RAW — ' + (data.adobeProfileLabel || fullProfile);
             var rawKind = String(doc.activeLayer.kind);
             if (data.lut && data.lut.kind === 'cube') sonyApplyLut(doc, data.lut);
             adobe = null;
-            return sonyPanelJSON({ok:true, document:doc.id, width:doc.width.as('px'), height:doc.height.as('px'), kind:rawKind, embeddedRaw:true, profileVerified:true, adobeProfile:fullProfile});
+            return sonyPanelJSON({ok:true, document:doc.id, width:doc.width.as('px'), height:doc.height.as('px'), kind:rawKind, embeddedRaw:true, profileVerified:true, adobeProfile:fullProfile, adobeLook:data.adobeLook || null, adobeProfileLabel:data.adobeProfileLabel || fullProfile});
         }
         if (action === 'purge') {
             app.purge(PurgeTarget.ALLCACHES);

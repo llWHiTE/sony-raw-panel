@@ -76,6 +76,14 @@ def snapshot_recipe(sony, folder, data, token=None):
     tree = ET.parse(recipe)
     if not any(e.text == 'DevelopmentParameters' for e in tree.iter('key')):
         raise ValueError('Sony did not save a development recipe.')
+    elements = list(tree.iter())
+    code = next((elements[i + 1].text for i, element in enumerate(elements[:-1]) if element.tag == 'key' and element.text == 'ColorModeByNum'), None)
+    selected = next((item for item in data.get('sony_options', []) if str(item['code']) == code), None)
+    if selected:
+        data['sony_profile'] = selected
+    elif code is not None:
+        data['sony_profile'] = dict(id='camera_standard' if code == '2' else 'sony:' + code,
+                                    code=int(code), label='Camera Standard' if code == '2' else 'Sony ' + code)
     data['settings'] = recipe.name
     data['settings_sha256'] = base.sha(recipe)
     data.setdefault('recipes', {})[recipe.name] = data['settings_sha256']
@@ -171,6 +179,36 @@ class Sony(base.Sony):
                 w.k.CloseHandle(handle)
         return w.wait(complete, 300, 'Sony TIFF writer did not finish.')
 
+    def profiles(self, name):
+        self.require(name)
+        control = w.control(self.main, 1302, 'ComboBox')
+        count = w.send(control, 0x0146)
+        if not 2 <= count <= 256:
+            raise RuntimeError('Sony: список Creative Style / Look недоступен.')
+        result = []
+        for index in range(1, count):
+            text = C.create_unicode_buffer(1024)
+            w.send(control, 0x0148, index, C.addressof(text))
+            code = w.send(control, 0x0150, index)
+            if not 0 < code < 65536 or not text.value:
+                raise RuntimeError('Sony: неожиданный идентификатор творческого профиля.')
+            result.append(dict(id='camera_standard' if code == 2 else 'sony:' + str(code),
+                               label=text.value, code=code, index=index))
+        return result
+
+    def set_profile(self, name, profile, options=None):
+        options = self.profiles(name) if options is None else options
+        selected = next((item for item in options if item['id'] == profile), None)
+        if selected is None:
+            raise ValueError('Sony: выбранный стиль недоступен для этого RAW: ' + str(profile))
+        control = w.control(self.main, 1302, 'ComboBox')
+        w.select(control, selected['index'])
+        self.ready()
+        self.require(name)
+        if w.send(control, 0x0150, w.send(control, 0x0147)) != selected['code']:
+            raise RuntimeError('Sony не подтвердил выбранный профиль.')
+        return selected
+
     def load_settings(self, path, name):
         self.require(name)
         dialog = self.command_dialog(37396)
@@ -238,6 +276,22 @@ def activate(sony, folder, data, revision=None):
         data['settings_sha256'] = base.sha(recipe)
         atomic_json(folder / 'project.json', data)
     return False
+
+
+def apply_profile(sony, folder, data, profile):
+    from profile_catalog import remember_sony
+    data['sony_options'] = sony.profiles('SonyRAW-' + data['id'] + '.ARW')
+    remember_sony(validate_raw(folder, data), ROOT, data['sony_options'])
+    selected = sony.set_profile('SonyRAW-' + data['id'] + '.ARW', profile, options=data['sony_options'])
+    recipe = snapshot_recipe(sony, folder, data)
+    root = ET.parse(recipe).getroot()
+    values = list(root.iter())
+    codes = [values[i + 1].text for i, value in enumerate(values[:-1]) if value.tag == 'key' and value.text == 'ColorModeByNum']
+    if codes != [str(selected['code'])]:
+        raise RuntimeError('Sony-рецепт не подтвердил выбранный профиль.')
+    data['sony_profile'] = selected
+    atomic_json(folder / 'project.json', data)
+    return selected
 
 
 def render(sony, folder, data, recipe=None):
@@ -335,8 +389,14 @@ def dispatch(request):
     if action == 'warmup':
         sony = Sony()
         return dict(pid=sony.pid, seconds=round(time.monotonic()-started, 3))
-    if action in ('open', 'prepare'):
-        folder, data = new_project(request['source'])
+    if action in ('open', 'prepare', 'profiles'):
+        if request.get('project'):
+            folder, data = project(checked_id(request['project']))
+            if Path(data['source']).resolve() != Path(request['source']).resolve():
+                raise ValueError('RAW не соответствует подготовленному проекту.')
+            validate_raw(folder, data)
+        else:
+            folder, data = new_project(request['source'])
     elif action in ('edit', 'update', 'checkpoint'):
         folder, data = project(checked_id(request['project']))
     else:
@@ -351,8 +411,15 @@ def dispatch(request):
         recipe = snapshot_recipe(sony, folder, data)
         return dict(project=data['id'], settings=recipe.name)
     candidate_recipe = None
+    if action == 'profiles':
+        activate(sony, folder, data)
+        options = sony.profiles('SonyRAW-' + data['id'] + '.ARW')
+        snapshot_recipe(sony, folder, data)
+        return dict(project=data['id'], source=data['source'], profiles=options)
     if action == 'prepare':
         activate(sony, folder, data)
+        if request.get('sony_profile') is not None:
+            apply_profile(sony, folder, data, request['sony_profile'])
         recipe = snapshot_recipe(sony, folder, data)
         data['active_revision'] = recipe.stem.removeprefix('settings-')
         atomic_json(folder / 'project.json', data)
@@ -374,6 +441,8 @@ def dispatch(request):
         reused = True
     else:
         reused = activate(sony, folder, data, revision)
+        if request.get('sony_profile') is not None:
+            apply_profile(sony, folder, data, request['sony_profile'])
     if action == 'edit':
         if w.u.IsIconic(sony.main):
             w.u.ShowWindow(sony.main, 9)

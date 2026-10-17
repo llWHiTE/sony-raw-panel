@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "models": {
+    "ILCE-7RM3": [
+      [2, "Standard"], [4, "Vivid"], [7, "Neutral"], [8, "Portrait"],
+      [9, "Landscape"], [10, "Clear"], [11, "Deep"], [12, "Light"],
+      [13, "Sunset"], [14, "Night Scene"], [15, "Autumn Leaves"],
+      [16, "Black & White"], [17, "Sepia"]
+    ],
+    "ILCE-7RM5": [
+      [2, "ST (Standard)"], [8, "PT (Portrait)"], [7, "NT (Neutral)"],
+      [4, "VV (Vivid)"], [19, "VV2 (Vivid 2)"], [18, "FL (Film)"],
+      [20, "IN (Instant)"], [21, "SH (Soft Highkey)"],
+      [16, "BW (Black & White)"], [17, "SE (Sepia)"]
+    ]
+  }
+}

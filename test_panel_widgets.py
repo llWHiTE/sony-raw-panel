@@ -38,6 +38,44 @@ class PanelWidgetTests(unittest.TestCase):
         self.panel.drain()
         self.assertFalse(self.panel.busy)
 
+    def catalog(self, model='ILCE-7RM3'):
+        return dict(source=str(self.folder/'photo.ARW'), model=model, seconds=.002, cached=True, sony_origin='Sony cache',
+                    adobe=[dict(id='camera_standard',label='Camera Standard'),dict(id='adobe_color',label='Adobe Color')],
+                    sony=[dict(id='camera_standard',label='Standard'),dict(id='sony:8',label='Portrait')])
+
+    def test_profile_defaults_are_standard_and_choices_are_camera_specific(self):
+        self.assertEqual(self.panel.adobe_profile.get(),'Camera Standard')
+        self.assertEqual(self.panel.sony_profile.get(),'Camera Standard')
+        self.panel.set_catalog(self.catalog())
+        self.assertEqual(self.panel.adobe_profile.get(),'Camera Standard')
+        self.assertEqual(self.panel.sony_profile.get(),'Standard')
+        self.panel.sony_profile.set('Portrait');self.panel.profile_changed()
+        self.panel.set_catalog(self.catalog('ILCE-OTHER'))
+        self.assertEqual(self.panel.sony_profile.get(),'Standard')
+        self.panel.set_catalog(self.catalog())
+        self.assertEqual(self.panel.sony_profile.get(),'Portrait')
+        self.assertEqual(self.panel.selected_profiles()['sony_profile'],'sony:8')
+
+    def test_added_raw_only_reads_catalog_and_prefetches_without_render(self):
+        controller=self.panel.controller
+        catalog=self.catalog();catalog['prefetch_engine']='sony'
+        with patch.object(controller,'profile_catalog',return_value=catalog),patch.object(controller,'prefetch',return_value={}) as prefetch,patch.object(controller,'open',side_effect=AssertionError('must not open')),patch.object(controller,'compare',side_effect=AssertionError('must not render')):
+            self.panel.stage_source(catalog['source']);self.pump()
+            deadline=time.monotonic()+3
+            while self.panel.prefetching and time.monotonic()<deadline:
+                self.panel.drain();self.root.update();time.sleep(.01)
+            prefetch.assert_called_once()
+            self.assertFalse(self.panel.prefetching)
+            self.assertEqual(self.panel.source_catalog['model'],'ILCE-7RM3')
+
+    def test_prefetch_completion_does_not_finish_queued_open(self):
+        self.panel.prefetching=True;self.panel.busy=True
+        self.panel.events.put(('done',('prefetch',{},.3)))
+        self.panel.drain()
+        self.assertFalse(self.panel.prefetching)
+        self.assertTrue(self.panel.busy)
+        self.panel.busy=False
+
     def test_custom_percent_dialog_saves_value(self):
         self.panel.preview_size.set(ui.preview.CUSTOM)
         self.panel.select_quality()

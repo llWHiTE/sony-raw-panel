@@ -62,15 +62,22 @@ class PreviewSony(bridge.Sony):
                     percent=percent, edge=max(new) if percent < 100 else 0)
 
 
-def prepare(source, percent=50, notify=lambda text: None):
+def prepare(source, percent=50, notify=lambda text: None, sony_profile='camera_standard', project=None):
     percent = validate_percent(percent)
     source_dimensions = image_size(source, oriented=True)
     bridge.PROJECTS.mkdir(exist_ok=True)
     bridge.CACHE.mkdir(exist_ok=True)
     started = time.monotonic()
-    folder, data = bridge.new_project(source)
+    if project:
+        folder, data = bridge.project(project)
+        if Path(data['source']).resolve() != Path(source).resolve():
+            raise ValueError('RAW не соответствует подготовленному проекту.')
+        bridge.validate_raw(folder, data)
+    else:
+        folder, data = bridge.new_project(source)
     sony = PreviewSony()
     bridge.activate(sony, folder, data)
+    selected_profile = bridge.apply_profile(sony, folder, data, sony_profile)
     token = bridge.uuid.uuid4().hex
     directory = ROOT / 'comparisons' / token
     directory.mkdir(parents=True)
@@ -85,7 +92,7 @@ def prepare(source, percent=50, notify=lambda text: None):
     dimensions = sony.preview(directory / 'sony.tif', name, percent, remember_dimensions, source_dimensions)
     data['output_dimensions'] = dimensions['original']
     bridge.atomic_json(folder / 'project.json', data)
-    state = dict(version=1, id=token, project=data['id'], revision=token, source=str(source),
+    state = dict(version=1, id=token, project=data['id'], revision=token, source=str(source), sonyProfile=selected_profile,
                  directory=str(directory), sony=str(directory/'sony.tif'), percent=percent, edge=dimensions['edge'],
                  dimensions=dimensions, created=time.time(), sony_seconds=round(time.monotonic()-started, 2))
     bridge.atomic_json(directory / 'comparison.json', state)
