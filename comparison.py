@@ -77,12 +77,12 @@ def prepare(source, percent=50, notify=lambda text: None, sony_profile='camera_s
         folder, data = bridge.new_project(source)
     sony = PreviewSony()
     bridge.activate(sony, folder, data)
-    selected_profile = bridge.apply_profile(sony, folder, data, sony_profile)
     token = bridge.uuid.uuid4().hex
+    selected_profile = bridge.apply_profile(sony, folder, data, sony_profile, recipe_token=token)
     directory = ROOT / 'comparisons' / token
     directory.mkdir(parents=True)
     name = 'SonyRAW-' + data['id'] + '.ARW'
-    recipe = bridge.snapshot_recipe(sony, folder, data, token)
+    recipe = bridge.settings_path(folder, data, token)
     data['active_revision'] = token
     bridge.atomic_json(folder / 'project.json', data)
     notify('Sony: предпросмотр %d%% от исходного RAW…' % percent)

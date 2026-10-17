@@ -26,7 +26,7 @@ def records(root):
 def remove_files(folder, ident):
     freed = 0
     skipped = 0
-    for name in ('sony.tif', 'AdobeRAW-' + ident + '.ARW', 'AdobeRAW-' + ident + '.xmp'):
+    for name in ('sony.tif', 'AdobeRAW-' + ident + '.ARW', 'AdobeRAW-' + ident + '.xmp', 'adobe-base.xmp'):
         path = folder / name
         if path.is_symlink() or path.resolve().parent != folder.resolve():
             skipped += 1
@@ -39,6 +39,60 @@ def remove_files(folder, ident):
         except OSError:
             skipped += 1
     return dict(bytes_freed=freed, skipped=skipped)
+
+
+def save_prompt(w, sony, dialog):
+    # Only the standard save-changes question owned by this exact Sony window.
+    if w.pid(dialog) != sony.pid or w.cls(dialog) != '#32770' or w.u.GetWindow(dialog, 4) != sony.main:
+        return None
+    children = [h for h in w.windows(dialog) if w.u.IsWindowVisible(h)]
+    buttons = {w.u.GetDlgCtrlID(h): h for h in children if w.cls(h) == 'Button'}
+    if not all(ident in buttons and w.u.IsWindowEnabled(buttons[ident]) for ident in (6, 7, 2)):
+        return None
+    if any(w.cls(h) in ('Edit', 'ComboBox', 'msctls_progress32') for h in children):
+        return None
+    text = '\n'.join(w.get_text(h) for h in children if w.cls(h) == 'Static')
+    if not re.search(r'(сохранить\s+изменения|save\s+(?:the\s+)?changes)', text, re.I):
+        return None
+    filenames = re.findall(r'[\w.-]+\.ARW\b', text, re.I)
+    if len(filenames) != 1:
+        return None
+    return dict(name=filenames[0], no=buttons[7], cancel=buttons[2])
+
+
+def close_sony_preview(bridge, sony, current, names):
+    # Caller already persisted and compared the recipe against this preview's revision.
+    if not re.fullmatch(r'SonyRAW-[a-f0-9]{32}\.ARW', current):
+        raise ValueError('Закрывать без сохранения можно только служебное превью панели.')
+    w = bridge.w
+    sony.ready(30)
+    if sony.active_name() != current:
+        raise RuntimeError('Sony переключил снимок перед очисткой; вкладка сохранена.')
+    w.post(sony.main, 0x0111, 57602)
+    handled = set()
+
+    def complete():
+        dialogs = sony.dialogs()
+        if dialogs:
+            if len(dialogs) != 1:
+                raise RuntimeError('Неизвестные окна Sony; очистка вкладки остановлена.')
+            dialog = dialogs[0]
+            if dialog in handled:
+                return False
+            prompt = save_prompt(w, sony, dialog)
+            if not prompt:
+                raise RuntimeError('Неизвестный диалог Sony оставлен без изменений.')
+            handled.add(dialog)
+            if prompt['name'] != current:
+                # Our close command raced a tab change: cancel, never discard that photo.
+                w.click(prompt['cancel'])
+                w.wait(lambda: dialog not in sony.dialogs(), 10, 'Sony не отменил закрытие вкладки.')
+                raise RuntimeError('Sony предложил сохранить другой RAW; закрытие отменено.')
+            w.click(prompt['no'])
+            return False
+        return current not in names() and w.u.IsWindowEnabled(sony.main)
+
+    w.wait(complete, 30, 'Sony не закрыл служебное превью.')
 
 
 def release_sony(bridge, candidates, excluded=()):
@@ -77,16 +131,16 @@ def release_sony(bridge, candidates, excluded=()):
                         sony.save_settings(recipe, current)
                         unchanged = bool(baseline and recipes_equal(baseline, recipe))
                     if unchanged:
-                        bridge.w.post(sony.main, 0x0111, 57602)
-                        sony.ready(30)
-                        bridge.w.wait(lambda: current not in names(), 15, 'Sony не закрыл служебное превью.')
+                        close_sony_preview(bridge, sony, current, names)
                         result['closed'] += 1
                         closed = True
                     else:
                         result['retained'] += 1
-                except (OSError, ValueError) as error:
+                except (OSError, ValueError, RuntimeError, TimeoutError) as error:
                     result['retained'] += 1
                     result['warnings'].append(str(error))
+                    if sony.dialogs():
+                        break
             if not names():
                 break
             if not closed and len(names()) > 1:
@@ -95,7 +149,7 @@ def release_sony(bridge, candidates, excluded=()):
             elif not closed:
                 break
     finally:
-        if original in names():
+        if not sony.dialogs() and original in names():
             for _ in range(len(names())):
                 if sony.active_name() == original:
                     break

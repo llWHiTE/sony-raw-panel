@@ -1,5 +1,7 @@
 """User-editable local CUBE library; selected LUTs are snapshotted per operation."""
 import hashlib
+from collections import OrderedDict
+from functools import lru_cache
 import uuid
 from pathlib import Path
 import shutil
@@ -47,7 +49,25 @@ def apply_xmp(raw, selection):
     return target.get('{' + CRS + '}CameraProfile', 'Camera ST')
 
 
+def file_signature(path):
+    stat = Path(path).stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+@lru_cache(maxsize=64)
+def validated_version(path, signature):
+    digest = validate_uncached(Path(path))
+    if file_signature(path) != signature:
+        raise ValueError('LUT изменился во время проверки.')
+    return digest
+
+
 def validate(path):
+    path = Path(path).resolve(strict=True)
+    return validated_version(str(path), file_signature(path))
+
+
+def validate_uncached(path):
     path = Path(path)
     if path.suffix.lower() not in ('.cube', '.xmp') or not path.is_file() or path.stat().st_size > 32 * 1024 * 1024:
         raise ValueError('Выберите .cube или .xmp размером до 32 МБ.')
@@ -57,6 +77,9 @@ def validate(path):
     from lut_profile import read_cube
     read_cube(path)
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+PREPARED = OrderedDict()
 
 
 def prepare_lut(selection, root):
@@ -70,7 +93,13 @@ def prepare_lut(selection, root):
     folder = Path(root) / 'lut-profiles'
     folder.mkdir(exist_ok=True)
     profile = folder / ('%s-v%d.icc' % (digest, VERSION))
-    # Reuse only a verified profile; old sessions without one are upgraded here.
+    # Fast path is limited to an already verified, unchanged file version in this process.
+    key = (str(path.resolve()), digest, str(profile.resolve()))
+    cached = PREPARED.get(key)
+    if cached and profile.is_file() and cached['signature'] == file_signature(profile):
+        if not selection.get('profile_sha256') or selection['profile_sha256'] == cached['sha256']:
+            PREPARED.move_to_end(key)
+            return dict(selection, profile=str(profile), profile_sha256=cached['sha256'], sha256=digest)
     expected = selection.get('profile_sha256')
     if not expected or not profile.is_file() or hashlib.sha256(profile.read_bytes()).hexdigest() != expected:
         contents = compile_profile(path)
@@ -81,6 +110,10 @@ def prepare_lut(selection, root):
         finally:
             temporary.unlink(missing_ok=True)
         expected = hashlib.sha256(contents).hexdigest()
+    PREPARED[key] = dict(signature=file_signature(profile), sha256=expected)
+    PREPARED.move_to_end(key)
+    while len(PREPARED) > 64:
+        PREPARED.popitem(last=False)
     return dict(selection, profile=str(profile), profile_sha256=expected, sha256=digest)
 
 
@@ -128,6 +161,6 @@ class Library:
         target = folder / (digest + path.suffix.lower())
         if not target.exists():
             shutil.copy2(path, target)
-        if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+        if validate(target) != digest:
             raise ValueError('Сохранённая копия LUT повреждена.')
         return prepare_lut(dict(path=str(target), name=path.stem, sha256=digest, kind=path.suffix.lower().lstrip('.')), self.root)

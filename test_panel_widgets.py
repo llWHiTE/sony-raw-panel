@@ -18,6 +18,8 @@ class PanelWidgetTests(unittest.TestCase):
         self.paths.start()
         self.root=tk.Tk()
         self.panel=ui.Panel(self.root,warmup=False,session=self.folder/'session.json')
+        scans=patch.object(self.panel,'scan')
+        scans.start();self.addCleanup(scans.stop)
         for task in self.root.tk.call('after','info'):self.root.after_cancel(task)
         self.root.update_idletasks()
 
@@ -90,6 +92,30 @@ class PanelWidgetTests(unittest.TestCase):
         prefs=json.loads((self.folder/'ui-preferences.json').read_text(encoding='utf-8'))
         self.assertEqual(prefs['preview_percent'],75)
         self.assertEqual(prefs['custom_percent'],37)
+
+    def test_lut_choice_is_enabled_in_ready_comparison(self):
+        self.panel.controller.comparison=dict(percent=50,shown='sony',view={'width':3000,'height':2000})
+        self.panel.buttons()
+        self.assertEqual(str(self.panel.lut_choice.cget('state')),'readonly')
+        self.panel.busy=True;self.panel.buttons()
+        self.assertEqual(str(self.panel.lut_choice.cget('state')),'disabled')
+        self.panel.busy=False
+
+    def test_live_lut_snapshot_runs_in_worker_and_error_restores_selection(self):
+        import threading
+        c=self.panel.controller
+        c.comparison=dict(percent=50,shown='adobe',view={'width':3000,'height':2000},lut=dict(name='LEICA NAT',kind='cube'))
+        self.panel.lut_text.set('LEICA BW HC.cube')
+        main=threading.get_ident();threads=[]
+        def snapshot(path):
+            threads.append(threading.get_ident());return dict(name='LEICA BW HC',kind='cube')
+        with patch.object(self.panel.lut_library,'snapshot',side_effect=snapshot),patch.object(c,'set_comparison_lut',side_effect=RuntimeError('modified')):
+            self.panel.change_comparison_lut();self.pump()
+        self.assertTrue(threads)
+        self.assertNotEqual(threads[0],main)
+        self.assertEqual(self.panel.lut_text.get(),'LEICA NAT.cube')
+        self.assertIn('Смена LUT',self.panel.duration_text.get())
+        self.assertEqual(c.comparison['shown'],'adobe')
 
     def test_single_compare_button_toggles_both_directions(self):
         c=self.panel.controller

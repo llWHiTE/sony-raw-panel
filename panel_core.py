@@ -240,10 +240,14 @@ class Controller:
         project_folder, project_data = bridge.project(state['project'])
         state['adobe'] = str(adobe.adobe_copy(Path(state['directory']), bridge.validate_raw(project_folder, project_data), state['id'], project_data['source_sha256']))
         from lut_library import apply_xmp
+        from development_profiles import apply_adobe_profile, restore_adobe_profile
+        apply_adobe_profile(state['adobe'], resolved_profile)
+        baseline = Path(state['directory']) / 'adobe-base.xmp'
+        baseline.write_bytes(Path(state['adobe']).with_suffix('.xmp').read_bytes())
+        state['adobeBase'] = str(baseline)
         state['lut'] = lut
         apply_xmp(state['adobe'], lut)
-        from development_profiles import apply_adobe_profile
-        apply_adobe_profile(state['adobe'], resolved_profile)
+        restore_adobe_profile(state['adobe'], baseline)
         state['adobeProfile'] = resolved_profile['camera_profile']
         state['adobeLook'] = resolved_profile.get('look_name')
         state['adobeLookUUID'] = resolved_profile.get('look_uuid')
@@ -253,7 +257,6 @@ class Controller:
         self.save_session()
         result = self.compare_call('build', state)
         state['view'] = result['comparison']
-        state['view']['historyCount'] = self.compare_call('inspect', state['view'])['historyCount']
         state['shown'] = 'sony'
         state['seconds'] = round(time.monotonic()-started, 2)
         self.save_session()
@@ -265,12 +268,61 @@ class Controller:
         if not state or not state.get('view'):
             raise RuntimeError('Сравнение ещё не готово.')
         result = self.compare_call('show', dict(state['view'], engine=engine))
-        state['view']['historyCount'] = self.compare_call('inspect', state['view'])['historyCount']
+        state['view']['historyCount'] = result['historyCount']
+        if 'historyID' in result:
+            state['view']['historyID'] = result['historyID']
         state['view']['modified'] = result['modified']
         state['shown'] = engine
         self.save_session()
         self.ps.foreground()
         return result
+
+    def set_comparison_lut(self, lut):
+        state = self.comparison
+        if not state or not state.get('view'):
+            raise RuntimeError('Сравнение ещё не готово.')
+        if self.pending or self.recovery:
+            raise RuntimeError('Завершите текущий импорт перед сменой LUT.')
+        previous = state.get('lut')
+        identity = lambda value: ((value or {}).get('kind'), (value or {}).get('sha256'), (value or {}).get('path'))
+        if identity(previous) == identity(lut):
+            return dict(unchanged=True, seconds=0, adobe_rendered=False)
+        started = time.monotonic()
+        adobe_changed = any(value and value.get('kind') == 'xmp' for value in (previous, lut))
+        sidecar = Path(state['adobe']).with_suffix('.xmp') if adobe_changed else None
+        original = None
+        if adobe_changed:
+            baseline = Path(state.get('adobeBase', ''))
+            expected = Path(state['directory']) / 'adobe-base.xmp'
+            if baseline != expected or not baseline.is_file() or baseline.resolve() != baseline.absolute():
+                raise RuntimeError('Для смены XMP создайте сравнение новой версией панели. CUBE можно менять без пересоздания.')
+            if sidecar.parent != baseline.parent or sidecar.resolve() != sidecar.absolute() or sidecar.stat().st_nlink != 1:
+                raise RuntimeError('Частный XMP сравнения перенаправлен. Создайте сравнение заново.')
+            self.notify('Применяю XMP: обновляется только Adobe. Sony не перепроявляется…')
+            original = sidecar.read_bytes()
+            try:
+                sidecar.write_bytes(baseline.read_bytes())
+                from lut_library import apply_xmp
+                from development_profiles import restore_adobe_profile
+                apply_xmp(state['adobe'], lut)
+                restore_adobe_profile(state['adobe'], baseline)
+            except Exception:
+                sidecar.write_bytes(original)
+                raise
+        else:
+            self.notify('Меняю LUT в готовом сравнении — без проявки RAW…')
+        request = dict(state, lut=lut, view=dict(state['view']), refreshAdobe=adobe_changed)
+        try:
+            result = self.compare_call('lut', request)
+        except Exception:
+            if original is not None:
+                sidecar.write_bytes(original)
+            raise
+        state['view'] = result['comparison']
+        state['lut'] = lut
+        state['lut_seconds'] = round(time.monotonic() - started, 3)
+        self.save_session()
+        return dict(seconds=state['lut_seconds'], adobe_rendered=adobe_changed, unchanged=False)
 
     def choose_comparison(self, engine):
         state = getattr(self, 'comparison', None)

@@ -130,9 +130,11 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(self.c,'compare_call',side_effect=RuntimeError('disconnected')):
             with self.assertRaises(RuntimeError):self.c.show_comparison('adobe')
         self.assertEqual(self.c.comparison['shown'],'sony')
-        with patch.object(self.c,'compare_call',side_effect=[{'modified':False},{'historyCount':3}]):
+        with patch.object(self.c,'compare_call',return_value={'modified':False,'historyCount':3}) as compare:
             self.c.show_comparison('adobe')
         self.assertEqual(self.c.comparison['shown'],'adobe')
+        self.assertEqual(self.c.comparison['view']['historyCount'],3)
+        self.assertEqual(compare.call_count,1)
 
     def test_initial_session_restores_after_restart(self):
         self.c.pending=dict(project='a'*32,revision='b'*32,kind='initial',source='source.ARW')

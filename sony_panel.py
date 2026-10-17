@@ -81,6 +81,8 @@ class Panel:
         self.lut_library = Library(ROOT, BUNDLE)
         self.lut_text = tk.StringVar(value='Без LUT')
         self.build()
+        if self.controller.comparison:
+            self.lut_text.set(self.comparison_lut_label())
         self.install_drop()
         root.attributes('-topmost', self.pinned.get())
         for preference in (self.preview_size, self.engine, self.first_sony, self.pinned, self.cleanup_warning):
@@ -192,6 +194,7 @@ class Panel:
         ttk.Label(lut_row, text='LUT / XMP:', style='Muted.TLabel').pack(side='left')
         self.lut_choice = ttk.Combobox(lut_row, textvariable=self.lut_text, values=self.lut_options(), state='readonly', width=20)
         self.lut_choice.pack(side='left', fill='x', expand=True, padx=(8, 5))
+        self.lut_choice.bind('<<ComboboxSelected>>', self.change_comparison_lut)
         self.lut_manage = ttk.Button(lut_row, text='…', style='Sony.TButton', width=3, command=self.manage_luts)
         self.lut_manage.pack(side='right')
         self.engine.trace_add('write', lambda *_: self.buttons())
@@ -231,14 +234,35 @@ class Panel:
     def lut_options(self):
         return ['Без LUT'] + [p.name + (' · Adobe' if p.suffix.lower() == '.xmp' else '') for p in self.lut_library.entries()]
 
-    def selected_lut(self):
+    def selected_lut_path(self):
         if self.lut_text.get() == 'Без LUT':
             return None
         for path in self.lut_library.entries():
             label = path.name + (' · Adobe' if path.suffix.lower() == '.xmp' else '')
             if label == self.lut_text.get():
-                return self.lut_library.snapshot(path)
+                return path
         raise ValueError('Выбранный LUT удалён. Выберите другой или «Без LUT».')
+
+    def snapshot_lut(self, path):
+        return self.lut_library.snapshot(path) if path else None
+
+    def selected_lut(self):
+        return self.snapshot_lut(self.selected_lut_path())
+
+    def comparison_lut_label(self):
+        lut = (self.controller.comparison or {}).get('lut')
+        return lut['name'] + '.' + lut['kind'] + (' · Adobe' if lut['kind'] == 'xmp' else '') if lut else 'Без LUT'
+
+    def change_comparison_lut(self, _=None):
+        if not self.controller.comparison or self.busy:
+            return
+        try:
+            path = self.selected_lut_path()
+        except (OSError, ValueError) as error:
+            self.lut_text.set(self.comparison_lut_label())
+            self.status_text.set(str(error))
+            return
+        self.submit('compare_lut', lambda: self.controller.set_comparison_lut(self.snapshot_lut(path)))
 
     def manage_luts(self):
         if self.busy:
@@ -477,7 +501,7 @@ class Panel:
         self.adobe_profile_choice.configure(state='readonly' if free and self.source_catalog and self.source_catalog['adobe'] else 'disabled')
         self.sony_profile_choice.configure(state='readonly' if free and self.source_catalog else 'disabled')
         self.engine_choice.configure(state='readonly' if free else 'disabled')
-        self.lut_choice.configure(state='readonly' if free else 'disabled')
+        self.lut_choice.configure(state='readonly' if free or (idle and comparison and comparison.get('view') and not pending and not recovery) else 'disabled')
         self.lut_manage.configure(state='normal' if free else 'disabled')
         self.first_check.configure(state='normal' if free and self.engine.get() == 'Sony' else 'disabled')
         ready_compare = bool(comparison and comparison.get('view'))
@@ -598,11 +622,11 @@ class Panel:
         first_sony = self.first_sony.get()
         engine = self.engine.get().lower()
         try:
-            lut = self.selected_lut()
+            lut_path = self.selected_lut_path()
         except (OSError, ValueError) as error:
             self.status_text.set(str(error))
             return
-        self.submit('open', lambda: self.controller.open(Path(path), first_sony=first_sony, engine=engine, lut=lut, **selected_profiles))
+        self.submit('open', lambda: self.controller.open(Path(path), first_sony=first_sony, engine=engine, lut=self.snapshot_lut(lut_path), **selected_profiles))
 
     def compare(self):
         if self.busy or self.controller.pending or self.controller.recovery:
@@ -619,11 +643,11 @@ class Panel:
             selected_profiles = self.selected_profiles()
             percent = self.preview_percent
             try:
-                lut = self.selected_lut()
+                lut_path = self.selected_lut_path()
             except (OSError, ValueError) as error:
                 self.status_text.set(str(error))
                 return
-            self.submit('compare', lambda: self.controller.compare(Path(source), percent, lut=lut, **selected_profiles))
+            self.submit('compare', lambda: self.controller.compare(Path(source), percent, lut=self.snapshot_lut(lut_path), **selected_profiles))
 
     def show_compare(self, engine):
         self.submit('compare_show', lambda: self.controller.show_comparison(engine))
@@ -766,12 +790,14 @@ class Panel:
                         self.bar.stop()
                         self.bar.configure(value=0)
                         self.elapsed_text.set('')
-                        if name in ('open', 'compare', 'compare_choose', 'apply'):
+                        if name in ('open', 'compare', 'compare_choose', 'compare_lut', 'apply'):
                             titles = {'open': 'Открытие', 'compare': 'Подготовка сравнения', 'compare_choose': 'Открытие полного размера',
-                                      'apply': 'Повторный импорт' if self.retrying_import else 'Применение'}
+                                      'compare_lut': 'Смена LUT / XMP', 'apply': 'Повторный импорт' if self.retrying_import else 'Применение'}
                             self.duration_text.set('%s: %.1f с%s' % (titles[name], seconds, ' · ошибка' if event == 'error' else ''))
                             if event == 'done' and self.opening_seconds:
                                 self.duration_text.set('Открытие и первая проявка: %.1f с\nПрименение: %.1f с · время настройки в Sony не включено' % (self.opening_seconds+seconds, seconds))
+                        if name == 'compare_lut':
+                            self.lut_text.set(self.comparison_lut_label())
                         if event == 'error':
                             self.last_error = result
                             self.status_label.configure(foreground='#ff9d9d')
@@ -785,6 +811,8 @@ class Panel:
                         elif name == 'compare':
                             view = result['view']
                             self.status_text.set('Сравнение %d × %d. Переключайте Sony / Adobe и выберите проявщик.' % (view['width'],view['height']))
+                        elif name == 'compare_lut':
+                            self.status_text.set('XMP обновлён только в Adobe; Sony не перепроявлялся.' if result.get('adobe_rendered') else 'LUT изменён в готовом сравнении. RAW не перепроявлялся.')
                         elif name == 'compare_show':
                             engine = (self.controller.comparison or {}).get('shown', 'sony')
                             self.status_text.set('Показан Sony.' if engine == 'sony' else 'Показан Adobe: ' + (self.controller.comparison or {}).get('adobeProfile', 'Camera ST'))

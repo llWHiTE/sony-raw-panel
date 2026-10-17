@@ -81,6 +81,30 @@ def resolve_adobe(source, profile=DEFAULT, roots=None):
     raise ValueError('Camera Raw: выбранный профиль не установлен для этой камеры: ' + str(profile))
 
 
+def restore_adobe_profile(raw, baseline):
+    """Restore only the frozen profile/Look, retaining the new preset's adjustments."""
+    from lut_library import xmp_tree
+    root, target = xmp_tree(Path(raw).with_suffix('.xmp'))
+    _, source = xmp_tree(baseline)
+    def is_profile(key):
+        return key.startswith('{' + CRS + '}') and key.split('}')[-1].startswith(('CameraProfile', 'Look', 'Table_'))
+    for key in list(target.attrib):
+        if is_profile(key):
+            del target.attrib[key]
+    for key, value in source.attrib.items():
+        if is_profile(key):
+            target.set(key, value)
+    for child in list(target):
+        if child.tag == '{' + CRS + '}Look':
+            target.remove(child)
+    for child in source:
+        if child.tag == '{' + CRS + '}Look':
+            target.append(ET.fromstring(ET.tostring(child)))
+    ET.register_namespace('crs', CRS)
+    ET.register_namespace('rdf', RDF)
+    Path(raw).with_suffix('.xmp').write_bytes(ET.tostring(root, encoding='utf-8', xml_declaration=True))
+
+
 def apply_adobe_profile(raw, resolved):
     """The explicit profile wins over a preset's competing camera profile/Look."""
     from lut_library import xmp_tree

@@ -15,6 +15,9 @@ class PreviewCleanupTests(unittest.TestCase):
         self.c=core.Controller(session=self.root/'session.json')
         self.paths=patch.object(core,'ROOT',self.root)
         self.paths.start()
+        for target,name,value in ((core.bridge.w.k,'CreateMutexW',1),(core.bridge.w.k,'CloseHandle',1),(core.C,'get_last_error',0)):
+            mocked=patch.object(target,name,return_value=value)
+            mocked.start();self.addCleanup(mocked.stop)
 
     def tearDown(self):
         self.paths.stop()
@@ -36,6 +39,15 @@ class PreviewCleanupTests(unittest.TestCase):
         self.assertEqual(result['bytes_freed'],4)
         self.assertTrue((folder/'keep.ARW').exists())
         self.assertTrue((folder/'comparison.json').exists())
+
+    def test_frozen_adobe_base_removed_but_user_sidecars_retained(self):
+        folder,state=self.manifest(closed=True)
+        (folder/'adobe-base.xmp').write_bytes(b'frozen')
+        (folder/'personal.xmp').write_bytes(b'user settings')
+        result=remove_files(folder,state['id'])
+        self.assertEqual(result['bytes_freed'],10)
+        self.assertFalse((folder/'adobe-base.xmp').exists())
+        self.assertEqual((folder/'personal.xmp').read_bytes(),b'user settings')
 
     def test_unrecognized_manifest_is_ignored(self):
         folder,state=self.manifest()

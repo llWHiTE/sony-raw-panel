@@ -278,12 +278,12 @@ def activate(sony, folder, data, revision=None):
     return False
 
 
-def apply_profile(sony, folder, data, profile):
+def apply_profile(sony, folder, data, profile, recipe_token=None):
     from profile_catalog import remember_sony
     data['sony_options'] = sony.profiles('SonyRAW-' + data['id'] + '.ARW')
     remember_sony(validate_raw(folder, data), ROOT, data['sony_options'])
     selected = sony.set_profile('SonyRAW-' + data['id'] + '.ARW', profile, options=data['sony_options'])
-    recipe = snapshot_recipe(sony, folder, data)
+    recipe = snapshot_recipe(sony, folder, data, recipe_token)
     root = ET.parse(recipe).getroot()
     values = list(root.iter())
     codes = [values[i + 1].text for i, value in enumerate(values[:-1]) if value.tag == 'key' and value.text == 'ColorModeByNum']
@@ -420,7 +420,9 @@ def dispatch(request):
         activate(sony, folder, data)
         if request.get('sony_profile') is not None:
             apply_profile(sony, folder, data, request['sony_profile'])
-        recipe = snapshot_recipe(sony, folder, data)
+            recipe = settings_path(folder, data)
+        else:
+            recipe = snapshot_recipe(sony, folder, data)
         data['active_revision'] = recipe.stem.removeprefix('settings-')
         atomic_json(folder / 'project.json', data)
         w.u.SetForegroundWindow(sony.main)
@@ -443,6 +445,7 @@ def dispatch(request):
         reused = activate(sony, folder, data, revision)
         if request.get('sony_profile') is not None:
             apply_profile(sony, folder, data, request['sony_profile'])
+            candidate_recipe = settings_path(folder, data)
     if action == 'edit':
         if w.u.IsIconic(sony.main):
             w.u.ShowWindow(sony.main, 9)

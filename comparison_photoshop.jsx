@@ -37,6 +37,101 @@ function sonyCompareProfileVerified(metadata, data) {
     return true;
 }
 
+function sonyCompareAdobePreview(data, width, height) {
+    var adobe = null;
+    try {
+        adobe = app.open(new File(data.adobe), sonyCompareOptions(data.edge, false));
+        var nativeSize = [adobe.width.as('px'), adobe.height.as('px')];
+        if (nativeSize[0] < width || nativeSize[1] < height) {
+            adobe.close(SaveOptions.DONOTSAVECHANGES); adobe = null;
+            adobe = app.open(new File(data.adobe), sonyCompareOptions(0, true));
+            nativeSize = [adobe.width.as('px'), adobe.height.as('px')];
+            if (nativeSize[0] < width || nativeSize[1] < height) {
+                throw new Error('Adobe RAW меньше запрошенного предпросмотра. Увеличение не выполняется.');
+            }
+        }
+        if (!sonyCompareProfileVerified(adobe.xmpMetadata.rawData, data)) {
+            throw new Error('Camera Raw не подтвердил выбранный профиль: ' + (data.adobeProfileLabel || data.adobeProfile));
+        }
+        if (adobe.colorProfileName !== 'sRGB IEC61966-2.1') {
+            adobe.convertProfile('sRGB IEC61966-2.1', Intent.RELATIVECOLORIMETRIC, true, false);
+        }
+        var scaled = sonyCompareScale(nativeSize[0], nativeSize[1], width, height);
+        if (nativeSize[0] !== width || nativeSize[1] !== height) {
+            adobe.resizeImage(UnitValue(scaled.width, 'px'), undefined, undefined, ResampleMethod.BICUBIC);
+        }
+        if (adobe.width.as('px') !== width || adobe.height.as('px') !== height) {
+            adobe.resizeCanvas(UnitValue(width, 'px'), UnitValue(height, 'px'), AnchorPosition.MIDDLECENTER);
+        }
+        return {document:adobe, nativeSize:nativeSize};
+    } catch (e) {
+        if (adobe) adobe.close(SaveOptions.DONOTSAVECHANGES);
+        throw e;
+    }
+}
+
+function sonyCompareHistoryID(doc) {
+    var previous = app.activeDocument;
+    try {
+        app.activeDocument = doc;
+        var s = stringIDToTypeID, ref = new ActionReference();
+        ref.putEnumerated(s('historyState'), s('ordinal'), s('targetEnum'));
+        return executeActionGet(ref).getInteger(s('ID'));
+    } finally { app.activeDocument = previous; }
+}
+
+function sonyCompareIsUnchanged(doc, data) {
+    return data.previewID && doc.info.caption.indexOf('Sony RAW Panel comparison: ' + data.previewID + '.') === 0 &&
+        !data.modified && (data.historyCount === undefined || data.historyCount === doc.historyStates.length) &&
+        (data.historyID === undefined || data.historyID === sonyCompareHistoryID(doc)) &&
+        doc.layers.length === (data.layerCount || 2) && sonyPanelLayer(doc, data.sonyLayer) && sonyPanelLayer(doc, data.adobeLayer) &&
+        (!data.lutLayer || sonyPanelLayer(doc, data.lutLayer));
+}
+
+function sonyCompareReplaceLut(data) {
+    var view = data.view, doc = sonyPanelDocument(view.document);
+    if (!sonyCompareIsUnchanged(doc, view)) throw new Error('Сравнение изменено вручную. Смена LUT отменена, чтобы сохранить работу.');
+    app.activeDocument = doc;
+    var before = doc.activeHistoryState, selected = doc.activeLayer.id;
+    var source = sonyPanelLayer(doc, view.sonyLayer), oldAdobe = sonyPanelLayer(doc, view.adobeLayer);
+    var oldLut = view.lutLayer ? sonyPanelLayer(doc, view.lutLayer) : null;
+    var temporary = null, freshAdobe = null, freshLut = null;
+    try {
+        if (data.refreshAdobe) {
+            temporary = sonyCompareAdobePreview(data, view.width, view.height).document;
+            freshAdobe = temporary.activeLayer.duplicate(doc, ElementPlacement.PLACEATBEGINNING);
+            temporary.close(SaveOptions.DONOTSAVECHANGES); temporary = null;
+            app.activeDocument = doc;
+            freshAdobe.name = 'Adobe — ' + (data.adobeProfileLabel || data.adobeProfile) +
+                (data.lut && data.lut.kind === 'xmp' ? ' / ' + data.lut.name : '');
+            freshAdobe.visible = oldAdobe.visible;
+        }
+        if (data.lut && data.lut.kind === 'cube') {
+            doc.activeLayer = oldLut || oldAdobe;
+            var id = sonyApplyLut(doc, data.lut);
+            freshLut = sonyPanelLayer(doc, id);
+            freshLut.move(doc, ElementPlacement.PLACEATBEGINNING);
+        }
+        if (oldLut) oldLut.remove();
+        if (freshAdobe) oldAdobe.remove();
+        var updated = {};
+        for (var key in view) if (view.hasOwnProperty(key)) updated[key] = view[key];
+        updated.adobeLayer = freshAdobe ? freshAdobe.id : view.adobeLayer;
+        updated.lutLayer = freshLut ? freshLut.id : null;
+        updated.layerCount = doc.layers.length;
+        var active = sonyPanelLayer(doc, selected);
+        doc.activeLayer = active || (freshLut || (freshAdobe || source));
+        updated.historyCount = doc.historyStates.length;
+        updated.historyID = sonyCompareHistoryID(doc);
+        return updated;
+    } catch (e) {
+        if (temporary) temporary.close(SaveOptions.DONOTSAVECHANGES);
+        app.activeDocument = doc;
+        doc.activeHistoryState = before;
+        throw e;
+    }
+}
+
 function sonyCompareCall(action, data) {
     var dialogs = app.displayDialogs;
     var adobe = null, sony = null;
@@ -46,28 +141,11 @@ function sonyCompareCall(action, data) {
             sony = app.open(new File(data.sony), OpenDocumentType.TIFF);
             var width = sony.width.as('px'), height = sony.height.as('px');
             sony.activeLayer.name = 'Sony — ' + (data.sonyProfile ? data.sonyProfile.label : 'Imaging Edge');
-            adobe = app.open(new File(data.adobe), sonyCompareOptions(data.edge, false));
-            var nativeAdobeSize = [adobe.width.as('px'), adobe.height.as('px')];
-            if (nativeAdobeSize[0] < width || nativeAdobeSize[1] < height) {
-                adobe.close(SaveOptions.DONOTSAVECHANGES);
-                adobe = app.open(new File(data.adobe), sonyCompareOptions(0, true));
-                nativeAdobeSize = [adobe.width.as('px'), adobe.height.as('px')];
-                if (nativeAdobeSize[0] < width || nativeAdobeSize[1] < height) {
-                    throw new Error('Adobe RAW меньше запрошенного предпросмотра. Увеличение превью не выполняется.');
-                }
-            }
-            var adobeMetadata = adobe.xmpMetadata.rawData;
+            var decoded = sonyCompareAdobePreview(data, width, height);
+            adobe = decoded.document;
+            var nativeAdobeSize = decoded.nativeSize;
             var expectedProfile = data.adobeProfile || 'Camera ST';
-            var profileVerified = sonyCompareProfileVerified(adobeMetadata, data);
-            if (!profileVerified) throw new Error('Camera Raw не подтвердил выбранный профиль: ' + (data.adobeProfileLabel || expectedProfile));
-            if (adobe.colorProfileName !== 'sRGB IEC61966-2.1') {
-                adobe.convertProfile('sRGB IEC61966-2.1', Intent.RELATIVECOLORIMETRIC, true, false);
-            }
-            var scaled = sonyCompareScale(nativeAdobeSize[0], nativeAdobeSize[1], width, height);
-            adobe.resizeImage(UnitValue(scaled.width, 'px'), undefined, undefined, ResampleMethod.BICUBIC);
-            if (adobe.width.as('px') !== width || adobe.height.as('px') !== height) {
-                adobe.resizeCanvas(UnitValue(width, 'px'), UnitValue(height, 'px'), AnchorPosition.MIDDLECENTER);
-            }
+            var profileVerified = true;
             adobe.activeLayer.duplicate(sony, ElementPlacement.PLACEATBEGINNING);
             adobe.close(SaveOptions.DONOTSAVECHANGES); adobe = null;
             app.activeDocument = sony;
@@ -81,7 +159,11 @@ function sonyCompareCall(action, data) {
             reference.layerCount = sony.layers.length;
             sony.info.caption = 'Sony RAW Panel comparison: ' + data.id + '. Choose an engine in the panel to create a full-resolution working document.';
             reference.historyCount = sony.historyStates.length;
+            reference.historyID = sonyCompareHistoryID(sony);
             return sonyPanelJSON({ok:true, comparison:reference});
+        }
+        if (action === 'lut') {
+            return sonyPanelJSON({ok:true, comparison:sonyCompareReplaceLut(data)});
         }
         if (action === 'inspect') {
             var inspected = sonyPanelDocument(data.document);
@@ -92,9 +174,10 @@ function sonyCompareCall(action, data) {
             app.activeDocument = doc;
             var a = sonyPanelLayer(doc, data.adobeLayer), s = sonyPanelLayer(doc, data.sonyLayer);
             if (!a || !s) throw new Error('Слои сравнения удалены.');
-            var modified = data.modified || (data.historyCount !== undefined && data.historyCount !== doc.historyStates.length);
+            var modified = data.modified || (data.historyCount !== undefined && data.historyCount !== doc.historyStates.length) ||
+                (data.historyID !== undefined && data.historyID !== sonyCompareHistoryID(doc));
             a.visible = data.engine === 'adobe'; s.visible = true;
-            return sonyPanelJSON({ok:true, historyCount:doc.historyStates.length, modified:modified});
+            return sonyPanelJSON({ok:true, historyCount:doc.historyStates.length, historyID:sonyCompareHistoryID(doc), modified:modified});
         }
         if (action === 'adobeFull') {
             var doc = app.open(new File(data.adobe), sonyCompareOptions(0, true), true);
@@ -138,10 +221,7 @@ function sonyCompareCall(action, data) {
             var previousDocument = app.activeDocument;
             var previousDocumentID = previousDocument.id;
             app.activeDocument = doc;
-            if (!data.previewID || doc.info.caption.indexOf('Sony RAW Panel comparison: ' + data.previewID + '.') !== 0 ||
-                data.modified || (data.historyCount !== undefined && data.historyCount !== doc.historyStates.length) ||
-                doc.layers.length !== (data.layerCount || 2) || !sonyPanelLayer(doc,data.sonyLayer) || !sonyPanelLayer(doc,data.adobeLayer) ||
-                (data.lutLayer && !sonyPanelLayer(doc,data.lutLayer))) {
+            if (!sonyCompareIsUnchanged(doc, data)) {
                 app.activeDocument = previousDocument;
                 throw new Error('Документ сравнения изменён; он оставлен открытым.');
             }
