@@ -17,7 +17,7 @@ def records(root):
             if record.is_symlink():
                 continue
             data = json.loads(record.read_text(encoding='utf-8'))
-            if data.get('version') == 1 and data.get('id') == folder.name:
+            if data.get('version') == 1 and data.get('id') == folder.name and not data.get('auxiliary'):
                 yield folder, data
         except (OSError, ValueError):
             continue

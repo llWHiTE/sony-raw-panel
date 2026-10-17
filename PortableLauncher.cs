@@ -12,8 +12,8 @@ using System.Windows.Forms;
 [assembly: AssemblyCompany("Alexey Storozhilov")]
 [assembly: AssemblyProduct("Sony RAW Panel")]
 [assembly: AssemblyCopyright("Copyright © 2026 Alexey Storozhilov")]
-[assembly: AssemblyVersion("0.7.0.0")]
-[assembly: AssemblyFileVersion("0.7.0.0")]
+[assembly: AssemblyVersion("0.8.0.0")]
+[assembly: AssemblyFileVersion("0.8.0.0")]
 
 internal static class PortableLauncher
 {
@@ -40,7 +40,7 @@ internal static class PortableLauncher
             string stamp;
             using (Stream payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("SonyRawPayload"))
                 stamp = PayloadHash(payload);
-            string runtime = Path.Combine(data, "runtime-0.7.0-" + stamp);
+            string runtime = Path.Combine(data, "runtime-0.8.0-" + stamp);
             bool created;
             using (var mutex = new Mutex(false, "Local\\SonyRawExtract-" + stamp, out created))
             {
@@ -82,6 +82,7 @@ internal static class PortableLauncher
             start.UseShellExecute = false;
             start.CreateNoWindow = true;
             start.EnvironmentVariables["SONY_RAW_PORTABLE_HOME"] = home;
+            start.EnvironmentVariables["SONY_RAW_LAUNCHER"] = Assembly.GetExecutingAssembly().Location;
             start.EnvironmentVariables["TCL_LIBRARY"] = Path.Combine(runtime, "tcl", "tcl8.6");
             start.EnvironmentVariables["TK_LIBRARY"] = Path.Combine(runtime, "tcl", "tk8.6");
             using (Process child = Process.Start(start))

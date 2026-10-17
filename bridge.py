@@ -207,14 +207,17 @@ class Sony:
         w.set_text(w.control(dialog, 1148, 'Edit'), str(path))
         self.submit(dialog)
         self.finish_dialog(dialog)
-        time.sleep(1)
-        w.wait(lambda: not (self.command_state(41217) & 3), 120, 'Sony RAW processing did not become available.')
+        def opened():
+            labels = [w.get_text(h).strip().lstrip('*') for h in w.windows(self.main)
+                      if w.u.GetDlgCtrlID(h) == 34101 and w.cls(h) == 'Static']
+            state = self.command_state(41217)
+            return path.name in labels and state != -1 and not (state & 3)
+        w.wait(opened, 120, 'Sony RAW processing did not become available.')
 
     def navigate(self, dialog, folder):
         # Sony rejects an absolute output filename, but accepts an existing folder.
         w.set_text(w.control(dialog, 1148, 'Edit'), str(folder))
         self.submit(dialog)
-        time.sleep(0.5)
         def check():
             if any(h != dialog for h in self.dialogs()):
                 raise RuntimeError('Sony folder navigation failed: ' + self.error_text())

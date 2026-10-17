@@ -125,9 +125,11 @@ def click(h):
 
 def wait(check, seconds, label):
     end = time.monotonic() + seconds
+    interval = 0.02
     while time.monotonic() < end:
         result = check()
         if result:
             return result
-        time.sleep(0.25)
+        time.sleep(min(interval, max(0, end - time.monotonic())))
+        interval = min(0.20, interval * 1.4)
     raise TimeoutError(label)

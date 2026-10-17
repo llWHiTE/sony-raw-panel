@@ -50,8 +50,8 @@ def apply_xmp(raw, selection):
 
 
 def file_signature(path):
-    stat = Path(path).stat()
-    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    from render_cache import signature
+    return signature(path)
 
 
 @lru_cache(maxsize=64)

@@ -54,13 +54,6 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                 }
             }
         }
-        try { $null = $photoshop.Version }
-        catch {
-            $rpcUnavailable = Test-RpcServerUnavailable $_
-            Clear-PhotoshopReference
-            if ($rpcUnavailable) { throw $script:rpcDisconnectedMessage }
-            throw $script:connectionLostMessage
-        }
         $script = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($request.script))
         try { $value = $photoshop.DoJavaScript($script) }
         catch {

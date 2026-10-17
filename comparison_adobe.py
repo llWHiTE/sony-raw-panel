@@ -7,9 +7,7 @@ import shutil
 def adobe_copy(folder, source, ident, expected_sha=None, profile=None):
     if not re.fullmatch(r'[a-f0-9]{32}', ident):
         raise ValueError('Invalid comparison identifier.')
-    def digest(path):
-        with path.open('rb') as f:
-            return hashlib.file_digest(f, 'sha256').hexdigest()
+    from render_cache import digest
     before = source.stat()
     expected_sha = expected_sha or digest(source)
     destination = folder / ('AdobeRAW-' + ident + '.ARW')

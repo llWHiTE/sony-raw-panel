@@ -40,8 +40,7 @@ class PreviewSony(bridge.Sony):
         w.set_text(w.control(dialog, 1148, 'Edit'), destination.name)
         self.submit(dialog)
         self.finish_dialog(dialog, 300, allow_progress=True)
-        w.wait(lambda: destination.is_file() and destination.stat().st_size > 0, 300, 'Sony preview was not exported.')
-        info = bridge.base.tiff_info(destination)
+        info = self.complete_tiff(destination)
         # Restore the export controls before any full-size working render is requested.
         restore = self.command_dialog(41217)
         try:

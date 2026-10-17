@@ -11,9 +11,11 @@ APP_FILES = (
     'runtime_paths.py', 'recipe_compare.py', 'app_info.py', 'comparison.py', 'comparison_adobe.py',
     'preview_settings.py', 'raw_dimensions.py', 'preview_cleanup.py', 'lut_library.py', 'lut_profile.py', 'lut_photoshop.jsx',
     'development_profiles.py', 'profile_catalog.py', 'sony-profile-catalog.json',
+    'advanced_core.py', 'advanced_panel.py', 'render_cache.py', 'render_workflow.py',
+    'task_scheduler.py', 'raw_queue.py', 'windows_integration.py', 'SonyRAWPanel.ico',
     'LICENSE', 'PYTHON_LICENSE.txt', 'TCL_LICENSE.txt', 'TK_LICENSE.txt',
     'panel_photoshop.jsx', 'comparison_photoshop.jsx', 'photoshop_host.ps1',
-    'PANEL.md', 'PORTABLE.md', 'THIRD_PARTY_NOTICES.md', 'BENCHMARK.md', 'CHANGELOG.md', 'verification.py',
+    'README.md', 'PANEL.md', 'PORTABLE.md', 'THIRD_PARTY_NOTICES.md', 'BENCHMARK.md', 'CHANGELOG.md', 'verification.py',
 )
 
 
@@ -53,6 +55,7 @@ def build(source, python_home, output):
     csc = Path('C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe')
     subprocess.run([str(csc), '/nologo', '/target:winexe', '/platform:x64', '/optimize+',
         '/reference:System.Windows.Forms.dll', '/reference:System.IO.Compression.dll',
+        '/win32icon:' + str(source / 'SonyRAWPanel.ico'),
         '/resource:' + str(payload) + ',SonyRawPayload', '/out:' + str(exe), str(source / 'PortableLauncher.cs')], check=True)
     digest = hashlib.sha256(exe.read_bytes()).hexdigest()
     (output / 'SHA256SUMS.txt').write_text(digest + '  ' + exe.name + '\n', encoding='ascii')

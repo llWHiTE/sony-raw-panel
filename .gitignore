@@ -5,6 +5,8 @@ adobe-projects/
 comparisons/
 cache/
 cache-v2/
+render-cache/
+runtime-*/
 requests*/
 panel-logs/
 cancelled-operations/

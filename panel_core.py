@@ -51,8 +51,11 @@ class Photoshop:
     def evaluate(self, script, start=False, timeout=180):
         with self.lock:
             self._start()
-            script = '$.evalFile(new File(%s)); $.evalFile(new File(%s));\n' % (
-                json.dumps(str(BUNDLE / 'panel_photoshop.jsx')), json.dumps(str(BUNDLE / 'lut_photoshop.jsx'))) + script
+            from render_cache import digest, key_for
+            helpers = [BUNDLE / name for name in ('panel_photoshop.jsx', 'lut_photoshop.jsx', 'comparison_photoshop.jsx')]
+            marker = key_for({'helpers': [(str(path), digest(path)) for path in helpers]})
+            loader = ''.join('$.evalFile(new File(%s));' % json.dumps(str(path)) for path in helpers)
+            script = 'if ($.global.sonyRawPanelCode !== %s) {%s $.global.sonyRawPanelCode = %s;}\n' % (json.dumps(marker), loader, json.dumps(marker)) + script
             photoshop_path = runtime.resolve_photoshop() if start else None
             payload = dict(action='eval', start=start, photoshop=str(photoshop_path) if photoshop_path else None,
                            script=base64.b64encode(script.encode('utf-8')).decode('ascii'))
@@ -125,9 +128,16 @@ def operation(request):
             bridge.w.k.CloseHandle(handle)
 
 
-class Controller:
+from advanced_core import AdvancedController
+
+
+class Controller(AdvancedController):
     def __init__(self, notify=None, session=None):
         self.ps = Photoshop()
+        self.bridge = bridge
+        self.timings = {}
+        self.prepared_sources = {}
+        self.full_prepared = None
         self.notify = notify or (lambda message: None)
         self.pending = None
         self.completed = None
@@ -142,11 +152,17 @@ class Controller:
             self.pending = state.get('pending')
             self.recovery = state.get('recovery')
             self.comparison = state.get('comparison')
+            self.full_prepared = state.get('full_prepared')
+            for item in state.get('prepared_sources', []):
+                if isinstance(item, dict) and item.get('engine') in ('sony', 'adobe') and isinstance(item.get('signature'), list) and len(item['signature']) >= 3:
+                    self.prepared_sources[(item['signature'][0], item['engine'])] = item
         except (OSError, ValueError):
             pass
 
     def save_session(self):
-        bridge.atomic_json(self.session, dict(pending=self.pending, recovery=self.recovery, comparison=self.comparison))
+        bridge.atomic_json(self.session, dict(version=2, pending=self.pending, recovery=self.recovery,
+                                                comparison=self.comparison, full_prepared=self.full_prepared,
+                                                prepared_sources=list(self.prepared_sources.values())))
         if self.comparison and self.comparison.get('id'):
             folder = bridge.child(ROOT / 'comparisons', self.comparison['id'])
             if folder.is_dir():
@@ -157,8 +173,7 @@ class Controller:
         data = dict(data)
         if data.get('lut'):
             data['lut'] = prepare_lut(data['lut'], ROOT)
-        script = '$.evalFile(new File(%s)); sonyCompareCall(%s, %s);' % (
-            json.dumps(str(BUNDLE / 'comparison_photoshop.jsx')), json.dumps(action), json.dumps(data, ensure_ascii=True))
+        script = 'sonyCompareCall(%s, %s);' % (json.dumps(action), json.dumps(data, ensure_ascii=True))
         response = self.ps.evaluate(script, start=start, timeout=300)
         if response is None and action in ('close', 'purge'):
             return {'ok': True, 'absent': True, 'purged': False}
@@ -171,8 +186,8 @@ class Controller:
 
     def source_signature(self, source):
         source = Path(source).resolve(strict=True)
-        stat = source.stat()
-        return [str(source), stat.st_size, stat.st_mtime_ns]
+        from render_cache import signature
+        return [str(source), *signature(source)]
 
     def profile_catalog(self, source, refresh=False):
         from profile_catalog import catalog
@@ -181,7 +196,9 @@ class Controller:
 
     def prefetch(self, source, engine='sony'):
         signature = self.source_signature(source)
-        current = self.prefetched
+        current = self.prepared_sources.get((str(Path(source).resolve()), engine)) or self.prefetched
+        if current and current['signature'] == signature and current['engine'] == engine:
+            self.prefetched = current
         if current and current['signature'] == signature and current['engine'] == engine:
             return current
         started = time.monotonic()
@@ -201,10 +218,12 @@ class Controller:
         if self.source_signature(source) != signature:
             raise ValueError('RAW изменился во время фоновой подготовки.')
         self.prefetched = dict(prepared, signature=signature, engine=engine, seconds=round(time.monotonic()-started, 2))
+        self.prepared_sources[(str(Path(source).resolve()), engine)] = self.prefetched
+        self.save_session()
         return self.prefetched
 
     def _prepared_project(self, source):
-        prepared = self.prefetched
+        prepared = self.prepared_sources.get((str(Path(source).resolve()), 'sony')) or self.prefetched
         if prepared and prepared['engine'] == 'sony' and prepared['signature'] == self.source_signature(source):
             return prepared['project']
         return None
@@ -232,7 +251,9 @@ class Controller:
         try:
             if not handle or error == 183:
                 raise RuntimeError('Другая операция Sony уже выполняется.')
-            state = comparison.prepare(Path(source), percent, self.notify, sony_profile=sony_profile, project=self._prepared_project(source))
+            from render_workflow import prepare_sony
+            self.timings = {}
+            state = prepare_sony(self, Path(source), percent, sony_profile, self._prepared_project(source))
         finally:
             if handle:
                 bridge.w.k.CloseHandle(handle)
@@ -255,7 +276,16 @@ class Controller:
         state['adobeProfileID'] = adobe_profile
         self.comparison = state
         self.save_session()
-        result = self.compare_call('build', state)
+        from render_workflow import adobe_request, commit_adobe, discard_adobe, stage
+        request = adobe_request(self, state)
+        try:
+            with stage(self, 'adobe_build_com'):
+                result = self.compare_call('build', request)
+            commit_adobe(self, request)
+        except Exception:
+            discard_adobe(request)
+            raise
+        state['timings'] = dict(self.timings)
         state['view'] = result['comparison']
         state['shown'] = 'sony'
         state['seconds'] = round(time.monotonic()-started, 2)
@@ -312,12 +342,17 @@ class Controller:
         else:
             self.notify('Меняю LUT в готовом сравнении — без проявки RAW…')
         request = dict(state, lut=lut, view=dict(state['view']), refreshAdobe=adobe_changed)
+        from render_workflow import adobe_request, commit_adobe, discard_adobe
         try:
+            if adobe_changed and state.get('source') and state.get('project') and state.get('dimensions'):
+                request = adobe_request(self, request)
             result = self.compare_call('lut', request)
         except Exception:
+            discard_adobe(request)
             if original is not None:
                 sidecar.write_bytes(original)
             raise
+        commit_adobe(self, request)
         state['view'] = result['comparison']
         state['lut'] = lut
         state['lut_seconds'] = round(time.monotonic() - started, 3)
@@ -333,7 +368,7 @@ class Controller:
         if engine == 'sony':
             state['selected_engine'] = 'sony'
             self.save_session()
-            render = operation(dict(action='update', project=state['project'], revision=state['revision']))
+            render = self.obtain_full_sony(state)
             render.update(source=state['source'], sourceName=Path(state['source']).name,
                           lut=state.get('lut') if (state.get('lut') or {}).get('kind') == 'cube' else None)
             self.recovery = dict(kind='open', render=render)
@@ -358,6 +393,7 @@ class Controller:
         state = getattr(self, 'comparison', None)
         if not state:
             return {'closed': True}
+        self.invalidate_prepared_full()
         if state.get('view'):
             try:
                 self.compare_call('close', state['view'], start=False)
@@ -533,7 +569,7 @@ class Controller:
         resolved = resolve_adobe(source, profile)
         started = time.monotonic()
         self.notify('Открываю RAW в Adobe Camera Raw — %s…' % resolved['label'])
-        prepared = self.prefetched
+        prepared = self.prepared_sources.get((str(source), 'adobe')) or self.prefetched
         if prepared and prepared['engine'] == 'adobe' and prepared['signature'] == self.source_signature(source):
             private = Path(prepared['adobe'])
             folder = private.parent

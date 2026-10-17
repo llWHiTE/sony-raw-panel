@@ -26,11 +26,15 @@ spec.loader.exec_module(core)
 TITLE = 'Sony RAW · Photoshop'
 
 
-class Panel:
+from advanced_panel import AdvancedPanel
+from task_scheduler import Scheduler
+
+
+class Panel(AdvancedPanel):
     def __init__(self, root, warmup=True, session=None):
         self.root = root
         self.events = queue.Queue()
-        self.jobs = queue.Queue()
+        self.jobs = Scheduler()
         self.controller = core.Controller(lambda text: self.events.put(('progress', text)), session=session)
         self.busy = False
         self.scanning = False
@@ -45,6 +49,8 @@ class Panel:
         self.retrying_import = False
         self.wrap_labels = []
         root.title(TITLE)
+        if (BUNDLE / 'SonyRAWPanel.ico').is_file():
+            root.iconbitmap(default=str(BUNDLE / 'SonyRAWPanel.ico'))
         root.geometry('440x720+%d+40' % max(20, root.winfo_screenwidth()-480))
         root.minsize(380, 480)
         root.configure(bg='#262626')
@@ -84,6 +90,7 @@ class Panel:
         if self.controller.comparison:
             self.lut_text.set(self.comparison_lut_label())
         self.install_drop()
+        self.setup_advanced(prefs)
         root.attributes('-topmost', self.pinned.get())
         for preference in (self.preview_size, self.engine, self.first_sony, self.pinned, self.cleanup_warning):
             preference.trace_add('write', self.save_preferences)
@@ -105,11 +112,30 @@ class Panel:
         style.configure('Sony.TLabel', background='#262626', foreground='#e0e0e0', font=('Segoe UI', 10))
         style.configure('Muted.TLabel', background='#262626', foreground='#b5b5b5', font=('Segoe UI', 9))
         style.configure('Heading.TLabel', background='#262626', foreground='#ffffff', font=('Segoe UI Semibold', 16))
-        style.configure('Sony.TButton', background='#393939', foreground='#e0e0e0', bordercolor='#555555', font=('Segoe UI', 9), padding=(10, 6))
-        style.map('Sony.TButton', background=[('disabled', '#303030'), ('active', '#4a4a4a')], foreground=[('disabled', '#858585')])
-        style.configure('Accent.TButton', background='#1473e6', foreground='#ffffff', font=('Segoe UI Semibold', 10), padding=(10, 8))
-        style.map('Accent.TButton', background=[('disabled', '#393939'), ('active', '#2680eb')], foreground=[('disabled', '#858585')])
-        style.configure('Sony.TCombobox', fieldbackground='#3b3b3b', background='#444444', foreground='#e0e0e0', arrowcolor='#b5b5b5', bordercolor='#555555', padding=3)
+        style.configure('Sony.TButton', background='#363636', foreground='#dedede', bordercolor='#505050',
+                        lightcolor='#363636', darkcolor='#363636', relief='flat', borderwidth=1,
+                        focuscolor='#83baff', focusthickness=1, font=('Segoe UI', 9), padding=(10, 6))
+        style.map('Sony.TButton', background=[('disabled', '#2d2d2d'), ('pressed', '#2b2b2b'), ('active', '#424242')],
+                  foreground=[('disabled', '#777777')], bordercolor=[('focus', '#83baff'), ('active', '#656565'), ('disabled', '#3c3c3c')],
+                  lightcolor=[('active', '#424242'), ('disabled', '#2d2d2d')], darkcolor=[('active', '#424242'), ('disabled', '#2d2d2d')])
+        style.configure('Accent.TButton', background='#1473e6', foreground='#ffffff', bordercolor='#1473e6',
+                        lightcolor='#1473e6', darkcolor='#1473e6', relief='flat', borderwidth=1,
+                        font=('Segoe UI Semibold', 10), padding=(10, 8))
+        style.map('Accent.TButton', background=[('disabled', '#333333'), ('pressed', '#0d66d0'), ('active', '#2680eb')],
+                  foreground=[('disabled', '#777777')], bordercolor=[('disabled', '#3c3c3c'), ('focus', '#a6ceff')],
+                  lightcolor=[('disabled', '#333333'), ('active', '#2680eb')], darkcolor=[('disabled', '#333333'), ('active', '#2680eb')])
+        style.configure('TButton', background='#363636', foreground='#dedede', bordercolor='#505050',
+                        lightcolor='#363636', darkcolor='#363636', relief='flat', borderwidth=1, padding=(8, 5))
+        style.map('TButton', background=[('active', '#424242')], foreground=[('disabled', '#777777')])
+        style.layout('Quiet.Vertical.TScrollbar', [('Vertical.Scrollbar.trough', {'sticky':'ns', 'children':
+                     [('Vertical.Scrollbar.thumb', {'expand':True, 'sticky':'nswe'})]})])
+        style.configure('Quiet.Vertical.TScrollbar', background='#505050', troughcolor='#262626',
+                        bordercolor='#262626', lightcolor='#505050', darkcolor='#505050',
+                        relief='flat', borderwidth=0, width=8, gripcount=0)
+        style.map('Quiet.Vertical.TScrollbar', background=[('pressed','#727272'),('active','#626262')],
+                  lightcolor=[('active','#626262')], darkcolor=[('active','#626262')])
+        style.configure('Sony.TCombobox', fieldbackground='#363636', background='#363636', foreground='#e0e0e0',
+                        arrowcolor='#a5a5a5', bordercolor='#505050', lightcolor='#363636', darkcolor='#363636', borderwidth=1, padding=3)
         style.map('Sony.TCombobox', fieldbackground=[('disabled', '#303030'), ('readonly', '#3b3b3b')],
                   foreground=[('disabled', '#858585'), ('readonly', '#e0e0e0')],
                   selectbackground=[('readonly', '#3b3b3b')], selectforeground=[('readonly', '#e0e0e0')])
@@ -139,6 +165,7 @@ class Panel:
         menu.add_separator()
         menu.add_command(label='Инструкция', command=self.help)
         self.tools.configure(menu=menu)
+        self.tools_menu = menu
         credit = ttk.Frame(footer, style='Sony.TFrame')
         credit.pack(fill='x', pady=(8, 0))
         ttk.Label(credit, text=AUTHOR, style='Muted.TLabel').pack(side='left')
@@ -149,11 +176,13 @@ class Panel:
         area = ttk.Frame(self.root, style='Sony.TFrame')
         area.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(area, bg='#262626', highlightthickness=0, borderwidth=0)
-        scrollbar = ttk.Scrollbar(area, orient='vertical', command=self.canvas.yview)
+        scrollbar = ttk.Scrollbar(area, orient='vertical', style='Quiet.Vertical.TScrollbar', command=self.canvas.yview)
+        self.scrollbar = scrollbar
         self.canvas.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side='right', fill='y')
         self.canvas.pack(side='left', fill='both', expand=True)
         frame = ttk.Frame(self.canvas, padding=(18, 14, 12, 8), style='Sony.TFrame')
+        self.content_frame = frame
         self.content_window = self.canvas.create_window((0, 0), window=frame, anchor='nw')
         frame.bind('<Configure>', lambda _: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
         def resize(event):
@@ -227,7 +256,7 @@ class Panel:
         self.bar = ttk.Progressbar(frame, mode='indeterminate', length=280, style='Sony.Horizontal.TProgressbar')
         self.bar.pack(fill='x', pady=(12, 6))
         self.status_label = label(self.status_text, 'Muted.TLabel', (0, 4))
-        label(self.duration_text, 'Sony.TLabel', (3, 0))
+        self.duration_label = label(self.duration_text, 'Sony.TLabel', (3, 0))
         label(self.elapsed_text, 'Muted.TLabel', (2, 0))
         ttk.Label(frame, text='Ctrl+O — открыть · Ctrl+Enter — применить', style='Muted.TLabel').pack(anchor='w', pady=(5, 0))
 
@@ -358,7 +387,8 @@ class Panel:
         core.bridge.atomic_json(ROOT / 'ui-preferences.json', dict(engine=self.engine.get(),
             first_sony=self.first_sony.get(), preview_percent=self.preview_percent,
             preview_mode=self.preview_mode, custom_percent=self.custom_percent, pinned=self.pinned.get(),
-            cleanup_warning=self.cleanup_warning.get(), camera_profiles=self.profile_preferences))
+            cleanup_warning=self.cleanup_warning.get(), camera_profiles=self.profile_preferences,
+            **self.advanced_preferences()))
 
     def startup(self):
         # Capture Tk values on the UI thread.
@@ -438,11 +468,14 @@ class Panel:
         callback_type = C.WINFUNCTYPE(C.c_ssize_t, w.W.HWND, w.W.UINT, w.W.WPARAM, w.W.LPARAM)
         @callback_type
         def dropped(hwnd, message, wp, lp):
+            handled = self.native_message(message, wp, lp)
+            if handled is not None:
+                return handled
             if message == 0x0233:
                 paths = []
                 try:
                     count = shell.DragQueryFileW(wp, 0xffffffff, None, 0)
-                    for i in range(min(count, 2)):
+                    for i in range(min(count, 256)):
                         length = shell.DragQueryFileW(wp, i, None, 0)
                         text = C.create_unicode_buffer(length+1)
                         shell.DragQueryFileW(wp, i, text, length+1)
@@ -468,6 +501,10 @@ class Panel:
                 result = function()
                 self.events.put(('done', (name, result, time.monotonic()-started)))
             except Exception as error:
+                from advanced_core import Deferred
+                if isinstance(error, Deferred) and name.startswith('background_'):
+                    self.events.put(('error', (name, str(error), time.monotonic()-started)))
+                    continue
                 logs = ROOT / 'panel-logs'
                 logs.mkdir(exist_ok=True)
                 with (logs / 'panel.log').open('a', encoding='utf-8') as f:
@@ -485,7 +522,8 @@ class Panel:
         self.retrying_import = name == 'apply' and bool(recovery)
         self.last_error = None
         self.status_label.configure(foreground='#b5b5b5')
-        self.status_text.set('Выполняю…')
+        waiting = self.jobs.active and self.jobs.active.name.startswith('background_') and self.background_jobs
+        self.status_text.set('Дождитесь окончания текущей фоновой операции; ваша команда следующая.' if waiting else 'Выполняю…')
         self.bar.start(12)
         self.buttons()
         self.jobs.put((name, function))
@@ -497,9 +535,10 @@ class Panel:
         recovery = self.controller.recovery
         comparison = self.controller.comparison
         free = idle and not pending and not recovery and not comparison
-        self.add_button.configure(state='normal' if free and not self.prefetching else 'disabled')
-        self.adobe_profile_choice.configure(state='readonly' if free and self.source_catalog and self.source_catalog['adobe'] else 'disabled')
-        self.sony_profile_choice.configure(state='readonly' if free and self.source_catalog else 'disabled')
+        self.add_button.configure(state='normal' if idle else 'disabled')
+        profile_ready = free or (idle and comparison and comparison.get('view') and not pending and not recovery)
+        self.adobe_profile_choice.configure(state='readonly' if profile_ready and self.source_catalog and self.source_catalog['adobe'] else 'disabled')
+        self.sony_profile_choice.configure(state='readonly' if profile_ready and self.source_catalog else 'disabled')
         self.engine_choice.configure(state='readonly' if free else 'disabled')
         self.lut_choice.configure(state='readonly' if free or (idle and comparison and comparison.get('view') and not pending and not recovery) else 'disabled')
         self.lut_manage.configure(state='normal' if free else 'disabled')
@@ -584,19 +623,28 @@ class Panel:
             ' · кэш' if catalog['cached'] else '', catalog['sony_origin']))
 
     def profile_changed(self, event=None):
+        if self.controller.comparison and event is not None:
+            engine = 'sony' if event.widget == self.sony_profile_choice else 'adobe'
+            profile = self.selected_profiles()[engine + '_profile']
+            self.submit('compare_profile', lambda: self.controller.set_comparison_profile(engine, profile))
+            return
         if self.source_catalog:
             selected = self.selected_profiles()
             self.profile_preferences[self.source_catalog['model']] = dict(adobe=selected['adobe_profile'], sony=selected['sony_profile'])
             if event is not None and event.widget == self.sony_profile_choice:
                 self.sony_profile_override = selected['sony_profile']
+            row = self.raw_queue.selected() if hasattr(self, 'raw_queue') else None
+            if row and Path(row['source']) == Path(self.source_catalog['source']):
+                row['settings'] = dict(selected)
+                self.raw_queue.save()
             self.save_preferences()
 
     def add_source(self):
-        if self.busy or self.controller.pending or self.controller.recovery or self.controller.comparison:
+        if self.busy:
             return
-        path = filedialog.askopenfilename(parent=self.root, title='Добавить Sony RAW без проявки', filetypes=[('Sony RAW', '*.arw *.ARW')])
-        if path:
-            self.stage_source(path)
+        paths = filedialog.askopenfilenames(parent=self.root, title='Добавить Sony RAW без проявки', filetypes=[('Sony RAW', '*.arw *.ARW')])
+        if paths:
+            self.receive_files(paths)
 
     def stage_source(self, path):
         engine = self.engine.get().lower()
@@ -760,13 +808,10 @@ class Panel:
         try:
             while True:
                 event, value = self.events.get_nowait()
+                if self.advanced_event(event, value):
+                    continue
                 if event == 'drop':
-                    if self.busy or self.controller.pending or self.controller.recovery or self.controller.comparison:
-                        self.status_text.set('Сначала завершите текущую проявку.')
-                    elif len(value) != 1 or Path(value[0]).suffix.lower() != '.arw' or not Path(value[0]).is_file():
-                        self.status_text.set('Перетащите один файл Sony ARW.')
-                    else:
-                        self.open_path(value[0])
+                    self.receive_files(value)
                 elif event == 'progress':
                     self.status_text.set(value)
                 elif event in ('done', 'error'):
@@ -790,9 +835,9 @@ class Panel:
                         self.bar.stop()
                         self.bar.configure(value=0)
                         self.elapsed_text.set('')
-                        if name in ('open', 'compare', 'compare_choose', 'compare_lut', 'apply'):
+                        if name in ('open', 'compare', 'compare_choose', 'compare_lut', 'compare_profile', 'apply'):
                             titles = {'open': 'Открытие', 'compare': 'Подготовка сравнения', 'compare_choose': 'Открытие полного размера',
-                                      'compare_lut': 'Смена LUT / XMP', 'apply': 'Повторный импорт' if self.retrying_import else 'Применение'}
+                                      'compare_lut': 'Смена LUT / XMP', 'compare_profile': 'Смена профиля', 'apply': 'Повторный импорт' if self.retrying_import else 'Применение'}
                             self.duration_text.set('%s: %.1f с%s' % (titles[name], seconds, ' · ошибка' if event == 'error' else ''))
                             if event == 'done' and self.opening_seconds:
                                 self.duration_text.set('Открытие и первая проявка: %.1f с\nПрименение: %.1f с · время настройки в Sony не включено' % (self.opening_seconds+seconds, seconds))
@@ -813,6 +858,8 @@ class Panel:
                             self.status_text.set('Сравнение %d × %d. Переключайте Sony / Adobe и выберите проявщик.' % (view['width'],view['height']))
                         elif name == 'compare_lut':
                             self.status_text.set('XMP обновлён только в Adobe; Sony не перепроявлялся.' if result.get('adobe_rendered') else 'LUT изменён в готовом сравнении. RAW не перепроявлялся.')
+                        elif name == 'compare_profile':
+                            self.status_text.set('Профиль обновлён только в выбранной ветке сравнения.')
                         elif name == 'compare_show':
                             engine = (self.controller.comparison or {}).get('shown', 'sony')
                             self.status_text.set('Показан Sony.' if engine == 'sony' else 'Показан Adobe: ' + (self.controller.comparison or {}).get('adobeProfile', 'Camera ST'))
@@ -875,6 +922,7 @@ class Panel:
                             self.set_catalog(self.controller.profile_catalog(self.source_catalog['source']))
                         except (OSError, ValueError):
                             pass
+                    self.after_operation(event, name, result)
                     self.buttons()
         except queue.Empty:
             pass
@@ -887,7 +935,8 @@ class Panel:
             self.elapsed_text.set('%.0f с · не переключайте снимок в Sony' % (time.monotonic()-self.started))
         else:
             self.elapsed_text.set('')
-        if self.heartbeats % 12 == 0:
+        interval = 12 if self.foreground.kind() in ('panel', 'photoshop', 'sony') and self.root.state() != 'withdrawn' else 120
+        if self.heartbeats % interval == 0:
             self.scan()
         if not self.closed:
             self.root.after(250, self.clock)
@@ -897,12 +946,16 @@ class Panel:
         os.startfile(str(BUNDLE / 'PANEL.md'))
 
     def close(self):
+        if self.jobs.active and self.jobs.active.name.startswith('background_') and self.background_jobs:
+            self.status_text.set('Дождитесь завершения фоновой операции перед выходом.')
+            return
         if self.busy:
             self.status_text.set('Дождитесь окончания операции перед закрытием панели.')
             return
         if self.controller.pending or self.controller.recovery:
             if not messagebox.askyesno(TITLE, 'Проявка ещё не применена. Закрыть панель?\nСостояние будет сохранено для следующего запуска.', parent=self.root):
                 return
+        self.close_advanced()
         self.closed = True
         self.jobs.put(None)
         for task in self.root.tk.call('after', 'info'):
@@ -916,6 +969,7 @@ def main():
     parser.add_argument('--no-warmup', action='store_true')
     parser.add_argument('--self-check', action='store_true')
     parser.add_argument('--verify-raw', type=Path)
+    parser.add_argument('raws', nargs='*', type=Path)
     args = parser.parse_args()
     if args.self_check or args.verify_raw:
         from verification import self_check, workflow_check
@@ -929,26 +983,23 @@ def main():
             return 1
         return 0
     k = core.bridge.w.k
-    mutex = k.CreateMutexW(None, False, 'Local\\SonyRawFloatingPanel')
+    import windows_integration as win
+    mutex = k.CreateMutexW(None, False, 'Local\\' + win.channel(ROOT))
     already = C.get_last_error() == 183
     if not mutex:
         raise C.WinError(C.get_last_error())
     try:
         if already:
-            u = core.bridge.w.u
-            u.FindWindowW.argtypes = [core.bridge.w.W.LPCWSTR, core.bridge.w.W.LPCWSTR]
-            u.FindWindowW.restype = core.bridge.w.W.HWND
-            h = u.FindWindowW(None, TITLE)
-            if h:
-                u.IsIconic.argtypes = [core.bridge.w.W.HWND]
-                u.ShowWindow.argtypes = [core.bridge.w.W.HWND, C.c_int]
-                u.SetForegroundWindow.argtypes = [core.bridge.w.W.HWND]
-                if u.IsIconic(h):
-                    u.ShowWindow(h, 9)
-                u.SetForegroundWindow(h)
+            core.bridge.w.wait(lambda: win.forward(ROOT, args.raws), 10, 'Панель запускается или не отвечает. Повторите отправку файлов.')
             return
+        shell = C.WinDLL('shell32', use_last_error=True)
+        shell.SetCurrentProcessExplicitAppUserModelID.argtypes = [core.bridge.w.W.LPCWSTR]
+        shell.SetCurrentProcessExplicitAppUserModelID('AlexeyStorozhilov.SonyRAWPanel')
         root = tk.Tk()
-        Panel(root, warmup=not args.no_warmup)
+        panel = Panel(root, warmup=not args.no_warmup)
+        if args.raws:
+            # Initial scan/startup may still be queued: receipt never replaces active work.
+            root.after(400, lambda: panel.receive_files(args.raws))
         root.mainloop()
     finally:
         k.CloseHandle(mutex)

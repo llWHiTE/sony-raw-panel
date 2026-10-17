@@ -163,6 +163,9 @@ class Sony(base.Sony):
         w.set_text(w.control(dialog, 1148, 'Edit'), destination.name)
         self.submit(dialog)
         self.finish_dialog(dialog, 300, allow_progress=True)
+        return self.complete_tiff(destination)
+
+    def complete_tiff(self, destination):
         w.k.CreateFileW.argtypes = [w.W.LPCWSTR, w.W.DWORD, w.W.DWORD, C.c_void_p, w.W.DWORD, w.W.DWORD, w.W.HANDLE]
         w.k.CreateFileW.restype = w.W.HANDLE
         def complete():
@@ -177,7 +180,10 @@ class Sony(base.Sony):
                 return tags
             finally:
                 w.k.CloseHandle(handle)
-        return w.wait(complete, 300, 'Sony TIFF writer did not finish.')
+        tags = w.wait(complete, 300, 'Sony TIFF writer did not finish.')
+        # The writer may close before Sony dismisses its final 100% progress dialog.
+        self.ready(300, allow_progress=True)
+        return tags
 
     def profiles(self, name):
         self.require(name)
@@ -242,6 +248,8 @@ def new_project(source):
                 source_size=stat.st_size, source_mtime_ns=stat.st_mtime_ns,
                 raw_size=raw.stat().st_size, raw_mtime_ns=raw.stat().st_mtime_ns,
                 settings=None, output_dimensions=list(dimensions), created=time.time())
+    from render_cache import signature
+    data['raw_signature'] = list(signature(raw))
     atomic_json(folder / 'project.json', data)
     return folder, data
 
@@ -251,8 +259,16 @@ def validate_raw(folder, data):
     st = raw.stat()
     if raw.resolve() != raw.absolute() or st.st_nlink != 1:
         raise RuntimeError('Working RAW must be an independent regular copy, not a filesystem link.')
-    if st.st_size != data['raw_size'] or st.st_mtime_ns != data['raw_mtime_ns']:
+    if st.st_size != data['raw_size']:
         raise RuntimeError('Working RAW copy changed. Original is untouched; do not overwrite the project.')
+    from render_cache import signature, digest
+    current = list(signature(raw))
+    if current != data.get('raw_signature'):
+        if digest(raw) != data.get('source_sha256'):
+            raise RuntimeError('Working RAW copy changed. Original is untouched; do not overwrite the project.')
+        data['raw_signature'] = current
+        data['raw_mtime_ns'] = st.st_mtime_ns
+        atomic_json(folder / 'project.json', data)
     return raw
 
 

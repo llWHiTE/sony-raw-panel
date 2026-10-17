@@ -40,7 +40,8 @@ function sonyCompareProfileVerified(metadata, data) {
 function sonyCompareAdobePreview(data, width, height) {
     var adobe = null;
     try {
-        adobe = app.open(new File(data.adobe), sonyCompareOptions(data.edge, false));
+        adobe = data.adobeCacheInput ? app.open(new File(data.adobeCacheInput), OpenDocumentType.TIFF) :
+            app.open(new File(data.adobe), sonyCompareOptions(data.edge, false));
         var nativeSize = [adobe.width.as('px'), adobe.height.as('px')];
         if (nativeSize[0] < width || nativeSize[1] < height) {
             adobe.close(SaveOptions.DONOTSAVECHANGES); adobe = null;
@@ -62,6 +63,13 @@ function sonyCompareAdobePreview(data, width, height) {
         }
         if (adobe.width.as('px') !== width || adobe.height.as('px') !== height) {
             adobe.resizeCanvas(UnitValue(width, 'px'), UnitValue(height, 'px'), AnchorPosition.MIDDLECENTER);
+        }
+        if (data.adobeCacheOutput) {
+            var options = new TiffSaveOptions();
+            options.imageCompression = TIFFEncoding.NONE;
+            options.embedColorProfile = true;
+            options.layers = false;
+            adobe.saveAs(new File(data.adobeCacheOutput), options, true);
         }
         return {document:adobe, nativeSize:nativeSize};
     } catch (e) {
@@ -132,6 +140,39 @@ function sonyCompareReplaceLut(data) {
     }
 }
 
+function sonyCompareRefresh(data) {
+    var view = data.view, doc = sonyPanelDocument(view.document);
+    if (!sonyCompareIsUnchanged(doc, view)) throw new Error('Сравнение изменено вручную; профиль не заменён.');
+    app.activeDocument = doc;
+    var before = doc.activeHistoryState, selected = doc.activeLayer.id, temporary = null;
+    try {
+        var old = sonyPanelLayer(doc, data.engine === 'sony' ? view.sonyLayer : view.adobeLayer);
+        temporary = data.engine === 'sony' ? app.open(new File(data.sony), OpenDocumentType.TIFF) :
+            sonyCompareAdobePreview(data, view.width, view.height).document;
+        if (Math.round(temporary.width.as('px')) !== Math.round(view.width) || Math.round(temporary.height.as('px')) !== Math.round(view.height) ||
+            temporary.bitsPerChannel !== BitsPerChannelType.SIXTEEN) throw new Error('Геометрия или битность ветки не совпадает: ' + temporary.width.as('px') + ' x ' + temporary.height.as('px') + ', ' + String(temporary.bitsPerChannel) + '; ожидалось ' + view.width + ' x ' + view.height);
+        var fresh = temporary.activeLayer.duplicate(doc, ElementPlacement.PLACEATBEGINNING);
+        temporary.close(SaveOptions.DONOTSAVECHANGES); temporary = null;
+        app.activeDocument = doc;
+        fresh.move(old, ElementPlacement.PLACEBEFORE);
+        fresh.name = data.engine === 'sony' ? 'Sony — ' + data.sonyProfile.label : 'Adobe — ' + data.adobeProfileLabel;
+        fresh.visible = old.visible;
+        old.remove();
+        var updated = {};
+        for (var key in view) if (view.hasOwnProperty(key)) updated[key] = view[key];
+        updated[data.engine === 'sony' ? 'sonyLayer' : 'adobeLayer'] = fresh.id;
+        doc.activeLayer = sonyPanelLayer(doc, selected) || fresh;
+        updated.historyCount = doc.historyStates.length;
+        updated.historyID = sonyCompareHistoryID(doc);
+        return updated;
+    } catch (e) {
+        if (temporary) temporary.close(SaveOptions.DONOTSAVECHANGES);
+        app.activeDocument = doc;
+        doc.activeHistoryState = before;
+        throw e;
+    }
+}
+
 function sonyCompareCall(action, data) {
     var dialogs = app.displayDialogs;
     var adobe = null, sony = null;
@@ -162,6 +203,12 @@ function sonyCompareCall(action, data) {
             reference.historyID = sonyCompareHistoryID(sony);
             return sonyPanelJSON({ok:true, comparison:reference});
         }
+        if (action === 'check') {
+            var checked = sonyPanelDocument(data.document);
+            if (!sonyCompareIsUnchanged(checked, data)) throw new Error('Сравнение изменено вручную; операция отменена.');
+            return sonyPanelJSON({ok:true});
+        }
+        if (action === 'refresh') return sonyPanelJSON({ok:true, comparison:sonyCompareRefresh(data)});
         if (action === 'lut') {
             return sonyPanelJSON({ok:true, comparison:sonyCompareReplaceLut(data)});
         }

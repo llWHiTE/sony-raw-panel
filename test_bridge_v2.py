@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('bridge_v2', ROOT / 'bridge_v2.py')
@@ -76,6 +77,25 @@ class CacheTests(unittest.TestCase):
         for value in ('../other', 'C:/private', '', 'f' * 31, 'f' * 33):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 b.clean_job(value, True, self.project)
+
+
+class WriterCompletionTests(unittest.TestCase):
+    def test_closed_writer_also_waits_for_sony_progress_to_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image=Path(directory)/'ready.tif';image.write_bytes(b'0'*24)
+            sony=object.__new__(b.Sony)
+            tags={256:[1],257:[1],259:[1]}
+            with patch.object(b.w.k,'CreateFileW',return_value=123),patch.object(b.w.k,'CloseHandle'),patch.object(b.base,'tiff_info',return_value=tags),patch.object(sony,'ready') as ready:
+                self.assertEqual(sony.complete_tiff(image),tags)
+                ready.assert_called_once_with(300,allow_progress=True)
+
+    def test_completion_does_not_dismiss_an_unexpected_dialog(self):
+        with tempfile.TemporaryDirectory() as directory:
+            image=Path(directory)/'ready.tif';image.write_bytes(b'0'*24)
+            sony=object.__new__(b.Sony)
+            with patch.object(b.w.k,'CreateFileW',return_value=123),patch.object(b.w.k,'CloseHandle'),patch.object(b.base,'tiff_info',return_value={256:[1],257:[1],259:[1]}),patch.object(sony,'ready',side_effect=RuntimeError('Sony requires attention')):
+                with self.assertRaisesRegex(RuntimeError,'attention'):sony.complete_tiff(image)
+            self.assertTrue(image.exists())
 
 
 class RecipeTests(unittest.TestCase):
